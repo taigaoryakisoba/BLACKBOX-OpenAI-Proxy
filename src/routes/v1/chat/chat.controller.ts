@@ -24,7 +24,7 @@ import {
   sendOpenAIError,
   makeChatCompletionChunk,
   buildToolSystemPrompt,
-  detectToolCall,
+  detectToolCalls,
 } from '../../../services/openai';
 import {
   buildBlackboxPayload,
@@ -131,9 +131,9 @@ export const chatCompletions = async (req: Request, res: Response) => {
       );
 
       let fullText = '';
-      let isToolCallCandidate = true;
-      let isStreamingText = false;
+      let streamedTextLength = 0;
       let inThinkBlock = false;
+      const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
 
       if (upstream.body) {
         for await (const delta of readUpstreamDeltas(
@@ -141,20 +141,6 @@ export const chatCompletions = async (req: Request, res: Response) => {
         )) {
           const chunk = delta as string;
           fullText += chunk;
-
-          if (isStreamingText) {
-            writeSseData(
-              res,
-              makeChatCompletionChunk({
-                id: completionId,
-                model: resolved.name,
-                created,
-                contentDelta: chunk,
-                finishReason: null,
-              })
-            );
-            continue;
-          }
 
           // <think> ブロックの簡易判定
           if (fullText.includes('<think>') && !fullText.includes('</think>')) {
@@ -166,88 +152,102 @@ export const chatCompletions = async (req: Request, res: Response) => {
 
           if (inThinkBlock) continue;
 
-          const processedText = fullText
-            .replace(/<think>[\s\S]*?<\/think>/gi, '')
-            .trim();
+          const processedText = fullText.replace(
+            /<think>[\s\S]*?<\/think>/gi,
+            ''
+          );
 
-          // まだテキストが十分にない場合は判定を保留
-          if (processedText.length < 5) continue;
+          let isToolCallCandidate = false;
+          if (hasTools) {
+            const remainingText = processedText.slice(streamedTextLength);
+            const idx1 = remainingText.indexOf('{');
+            const idx2 = remainingText.indexOf('[Tool call:');
+            const idx3 = remainingText.indexOf('```');
 
-          // ツールコールの候補かどうかの判定
-          if (
-            processedText.startsWith('{') ||
-            processedText.startsWith('[Tool call:') ||
-            processedText.startsWith('```')
-          ) {
-            // ツールコールの可能性が高いのでバッファリングを継続
-            isToolCallCandidate = true;
-          } else {
-            // 通常のテキストメッセージと判定
-            isToolCallCandidate = false;
-            isStreamingText = true;
+            const indices = [idx1, idx2, idx3].filter((i) => i !== -1);
 
-            // 蓄積していたテキストを送信
-            writeSseData(
-              res,
-              makeChatCompletionChunk({
-                id: completionId,
-                model: resolved.name,
-                created,
-                contentDelta: processedText,
-                finishReason: null,
-              })
-            );
+            if (indices.length > 0) {
+              isToolCallCandidate = true;
+              const firstIndicatorIdx = Math.min(...indices);
+
+              if (firstIndicatorIdx > 0) {
+                const safeText = remainingText.slice(0, firstIndicatorIdx);
+                writeSseData(
+                  res,
+                  makeChatCompletionChunk({
+                    id: completionId,
+                    model: resolved.name,
+                    created,
+                    contentDelta: safeText,
+                    finishReason: null,
+                  })
+                );
+                streamedTextLength += safeText.length;
+              }
+            }
+          }
+
+          if (!isToolCallCandidate) {
+            const newText = processedText.slice(streamedTextLength);
+            if (newText.length > 0) {
+              writeSseData(
+                res,
+                makeChatCompletionChunk({
+                  id: completionId,
+                  model: resolved.name,
+                  created,
+                  contentDelta: newText,
+                  finishReason: null,
+                })
+              );
+              streamedTextLength = processedText.length;
+            }
           }
         }
       }
 
-      if (isToolCallCandidate) {
-        const processedText = fullText
-          .replace(/<think>[\s\S]*?<\/think>/gi, '')
-          .trim();
-        const toolCall = detectToolCall(processedText, body.tools ?? []);
+      const processedText = fullText.replace(/<think>[\s\S]*?<\/think>/gi, '');
+      const toolCalls = detectToolCalls(processedText, body.tools ?? []);
 
-        if (toolCall) {
-          writeSseData(res, {
-            id: completionId,
-            object: 'chat.completion.chunk',
-            created,
-            model: resolved.name,
-            choices: [
-              {
-                index: 0,
-                delta: {
-                  tool_calls: [
-                    {
-                      index: 0,
-                      id: `call_${genId()}`,
-                      type: 'function',
-                      function: {
-                        name: toolCall.name,
-                        arguments: toolCall.arguments,
-                      },
-                    },
-                  ],
-                },
-                finish_reason: 'tool_calls',
+      if (toolCalls && toolCalls.length > 0) {
+        writeSseData(res, {
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created,
+          model: resolved.name,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                tool_calls: toolCalls.map((tc, idx) => ({
+                  index: idx,
+                  id: `call_${genId()}`,
+                  type: 'function',
+                  function: {
+                    name: tc.name,
+                    arguments: tc.arguments,
+                  },
+                })),
               },
-            ],
-          });
-        } else {
-          // ツールコール候補だったが、最終的にツールコールとして検出されなかった場合
+              finish_reason: 'tool_calls',
+            },
+          ],
+        });
+      } else {
+        const remainingText = processedText.slice(streamedTextLength);
+        if (remainingText.length > 0) {
           writeSseData(
             res,
             makeChatCompletionChunk({
               id: completionId,
               model: resolved.name,
               created,
-              contentDelta: processedText,
-              finishReason: 'stop',
+              contentDelta: remainingText,
+              finishReason: null,
             })
           );
         }
-      } else {
-        // 通常のテキストストリーミングの終了
+
         writeSseData(
           res,
           makeChatCompletionChunk({
@@ -290,9 +290,9 @@ export const chatCompletions = async (req: Request, res: Response) => {
     const processedText = aiText
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .trim();
-    const toolCall = detectToolCall(processedText, body.tools ?? []);
+    const toolCalls = detectToolCalls(processedText, body.tools ?? []);
 
-    if (toolCall) {
+    if (toolCalls && toolCalls.length > 0) {
       return res.json({
         id: `chatcmpl_${genId()}`,
         object: 'chat.completion',
@@ -304,16 +304,14 @@ export const chatCompletions = async (req: Request, res: Response) => {
             message: {
               role: 'assistant',
               content: null,
-              tool_calls: [
-                {
-                  id: `call_${genId()}`,
-                  type: 'function',
-                  function: {
-                    name: toolCall.name,
-                    arguments: toolCall.arguments,
-                  },
+              tool_calls: toolCalls.map((tc) => ({
+                id: `call_${genId()}`,
+                type: 'function',
+                function: {
+                  name: tc.name,
+                  arguments: tc.arguments,
                 },
-              ],
+              })),
             },
             finish_reason: 'tool_calls',
           },

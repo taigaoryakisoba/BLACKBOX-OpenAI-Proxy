@@ -230,7 +230,8 @@ const fixJsonQuotes = (str: string): string => {
   return result;
 };
 
-const extractFirstJsonObject = (text: string): string | null => {
+const extractAllJsonObjects = (text: string): string[] => {
+  const results: string[] = [];
   let start = -1;
   let depth = 0;
   let inString = false;
@@ -287,26 +288,30 @@ const extractFirstJsonObject = (text: string): string | null => {
         const candidate = text.slice(start, i + 1);
         try {
           JSON.parse(candidate);
-          return candidate;
+          results.push(candidate);
         } catch {
           const fixed = fixJsonQuotes(candidate);
           try {
             JSON.parse(fixed);
-            return fixed;
+            results.push(fixed);
           } catch {
-            start = -1;
-            depth = 0;
-            inString = false;
+            // Invalid JSON, ignore
           }
         }
+        start = -1;
+        depth = 0;
+        inString = false;
       }
     }
   }
 
-  return null;
+  return results;
 };
 
-export const detectToolCall = (text: string, tools: any[]): ToolCall | null => {
+export const detectToolCalls = (
+  text: string,
+  tools: any[]
+): ToolCall[] | null => {
   if (!text || !Array.isArray(tools) || tools.length === 0) return null;
 
   const toolMap = new Map();
@@ -318,66 +323,72 @@ export const detectToolCall = (text: string, tools: any[]): ToolCall | null => {
   if (toolMap.size === 0) return null;
 
   const cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  const toolCalls: ToolCall[] = [];
 
-  // 1. [Tool call: name(args)] 形式のフォールバック検出
-  const toolCallMatch = cleaned.match(
-    /\[Tool call:\s*([a-zA-Z0-9_-]+)\((.*?)\)\]/
-  );
-  if (toolCallMatch) {
-    const name = toolCallMatch[1];
-    const args = toolCallMatch[2];
+  // 1. [Tool call: name(args)] 形式のフォールバック検出 (複数対応)
+  const toolCallRegex = /\[Tool call:\s*([a-zA-Z0-9_-]+)\((.*?)\)\]/g;
+  let match;
+  while ((match = toolCallRegex.exec(cleaned)) !== null) {
+    const name = match[1];
+    const args = match[2];
     if (toolMap.has(name)) {
-      return { name, arguments: args };
+      toolCalls.push({ name, arguments: args });
     }
   }
 
-  // 2. Markdown コードブロック内の JSON 検出
+  if (toolCalls.length > 0) return toolCalls;
+
+  // 2. Markdown コードブロック内の JSON 検出、または生の JSON
   const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   const targetText = codeBlockMatch ? codeBlockMatch[1] : cleaned;
 
-  const jsonStr = extractFirstJsonObject(targetText);
-  if (!jsonStr) return null;
+  const jsonStrs = extractAllJsonObjects(targetText);
 
-  let json;
-  try {
-    json = JSON.parse(jsonStr);
-  } catch {
-    return null;
+  for (const jsonStr of jsonStrs) {
+    let json;
+    try {
+      json = JSON.parse(jsonStr);
+    } catch {
+      continue;
+    }
+
+    // {"tool": "name", "parameters": {...}}
+    if (json.tool && typeof json.tool === 'string' && toolMap.has(json.tool)) {
+      const params = json.parameters ?? {};
+      toolCalls.push({
+        name: json.tool,
+        arguments: typeof params === 'string' ? params : JSON.stringify(params),
+      });
+      continue;
+    }
+
+    // {"name": "name", "arguments": {...}}
+    if (json.name && typeof json.name === 'string' && toolMap.has(json.name)) {
+      const args = json.arguments ?? json.parameters ?? {};
+      toolCalls.push({
+        name: json.name,
+        arguments: typeof args === 'string' ? args : JSON.stringify(args),
+      });
+      continue;
+    }
+
+    // {"type": "function", "function": {"name": "name", "arguments": {...}}}
+    if (
+      json.type === 'function' &&
+      json.function &&
+      typeof json.function.name === 'string' &&
+      toolMap.has(json.function.name)
+    ) {
+      const args = json.function.arguments ?? {};
+      toolCalls.push({
+        name: json.function.name,
+        arguments: typeof args === 'string' ? args : JSON.stringify(args),
+      });
+      continue;
+    }
   }
 
-  // {"tool": "name", "parameters": {...}}
-  if (json.tool && typeof json.tool === 'string' && toolMap.has(json.tool)) {
-    const params = json.parameters ?? {};
-    return {
-      name: json.tool,
-      arguments: typeof params === 'string' ? params : JSON.stringify(params),
-    };
-  }
-
-  // {"name": "name", "arguments": {...}}
-  if (json.name && typeof json.name === 'string' && toolMap.has(json.name)) {
-    const args = json.arguments ?? json.parameters ?? {};
-    return {
-      name: json.name,
-      arguments: typeof args === 'string' ? args : JSON.stringify(args),
-    };
-  }
-
-  // {"type": "function", "function": {"name": "name", "arguments": {...}}}
-  if (
-    json.type === 'function' &&
-    json.function &&
-    typeof json.function.name === 'string' &&
-    toolMap.has(json.function.name)
-  ) {
-    const args = json.function.arguments ?? {};
-    return {
-      name: json.function.name,
-      arguments: typeof args === 'string' ? args : JSON.stringify(args),
-    };
-  }
-
-  return null;
+  return toolCalls.length > 0 ? toolCalls : null;
 };
 
 export const normalizeMessagesToBlackboxShape = async (
