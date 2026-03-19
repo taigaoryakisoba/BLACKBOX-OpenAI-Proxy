@@ -1,0 +1,27 @@
+{
+  "name": "blackbox-openai-proxy",
+  "description": "BLACKBOX AI API を OpenAI Response API 互換として変換するプロキシサーバー",
+  "version": "1.0.1",
+  "author": "kuwa",
+  "keywords": [],
+  "main": "index.js",
+  "scripts": {
+    "wintest": "title %npm_config_id% && tsc && tsc-alias && node ./dist/index.js",
+    "dev": "tsc && tsc-alias && node ./dist/index.js",
+    "build": "tsc && tsc-alias",
+    "winstart": "title %npm_config_id% && node ./dist/index.js",
+    "start": "node ./dist/index.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "tslog": "^4.9.3"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.7.5"
+  }
+}
