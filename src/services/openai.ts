@@ -325,6 +325,75 @@ export const detectToolCalls = (
   const cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
   const toolCalls: ToolCall[] = [];
 
+  // 0. Freeform tool detection
+  if (toolMap.has('apply_patch')) {
+    const patchRegex = /\*\*\* Begin Patch[\s\S]*?(?:\*\*\* End Patch|$)/g;
+    let patchMatch;
+    let foundPatch = false;
+    while ((patchMatch = patchRegex.exec(cleaned)) !== null) {
+      const patchContent = patchMatch[0];
+      toolCalls.push({
+        name: 'apply_patch',
+        arguments: JSON.stringify({ input: patchContent }),
+      });
+      foundPatch = true;
+    }
+    if (foundPatch) return toolCalls;
+  }
+
+  if (toolMap.has('js_repl') && cleaned.includes('// codex-js-repl:')) {
+    const jsReplRegex =
+      /(?:\/\/\s*codex-js-repl:[^\r\n]*\r?\n)(?:\s*)(?:[^\s{"`]|`[^`]|``[^`])[\s\S]*/g;
+    let jsReplMatch;
+    let foundJsRepl = false;
+    while ((jsReplMatch = jsReplRegex.exec(cleaned)) !== null) {
+      const jsReplContent = jsReplMatch[0];
+      if (jsReplContent.trim()) {
+        toolCalls.push({
+          name: 'js_repl',
+          arguments: JSON.stringify({ input: jsReplContent }),
+        });
+        foundJsRepl = true;
+      }
+    }
+    if (foundJsRepl) return toolCalls;
+  }
+
+  if (toolMap.has('artifacts') && cleaned.includes('// codex-artifact-tool:')) {
+    const artifactsRegex =
+      /(?:\/\/\s*codex-artifact-tool:[^\r\n]*\r?\n)(?:\s*)(?:[^\s{"`]|`[^`]|``[^`])[\s\S]*/g;
+    let artifactsMatch;
+    let foundArtifacts = false;
+    while ((artifactsMatch = artifactsRegex.exec(cleaned)) !== null) {
+      const artifactsContent = artifactsMatch[0];
+      if (artifactsContent.trim()) {
+        toolCalls.push({
+          name: 'artifacts',
+          arguments: JSON.stringify({ input: artifactsContent }),
+        });
+        foundArtifacts = true;
+      }
+    }
+    if (foundArtifacts) return toolCalls;
+  }
+
+  if (toolMap.has('exec') && cleaned.includes('// @exec:')) {
+    const execRegex = /(?:\/\/\s*@exec:[^\r\n]*\r?\n)[\s\S]+/g;
+    let execMatch;
+    let foundExec = false;
+    while ((execMatch = execRegex.exec(cleaned)) !== null) {
+      const execContent = execMatch[0];
+      if (execContent.trim()) {
+        toolCalls.push({
+          name: 'exec',
+          arguments: JSON.stringify({ input: execContent }),
+        });
+        foundExec = true;
+      }
+    }
+    if (foundExec) return toolCalls;
+  }
+
   // 1. [Tool call: name(args)] 形式のフォールバック検出 (複数対応)
   const toolCallRegex = /\[Tool call:\s*([a-zA-Z0-9_-]+)\((.*?)\)\]/g;
   let match;
