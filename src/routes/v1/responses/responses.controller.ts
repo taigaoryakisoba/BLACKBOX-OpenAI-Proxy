@@ -65,7 +65,7 @@ export const responses = async (req: Request, res: Response) => {
   }
 
   const chatId = genShortId();
-  const messages = normalizeMessagesToBlackboxShape(
+  const messages = await normalizeMessagesToBlackboxShape(
     openAiMessages,
     resolved.name
   );
@@ -142,141 +142,293 @@ export const responses = async (req: Request, res: Response) => {
         }
       );
 
-      // レスポンス全体をバッファリング（ツールコール検出のため）
       let fullText = '';
+      let isToolCallCandidate = true;
+      let isStreamingText = false;
+      let inThinkBlock = false;
+      const itemId = `msg_${genId()}`;
+      const contentIndex = 0;
+      let seq = 1;
+
       if (upstream.body) {
         for await (const delta of readUpstreamDeltas(
           upstream.body.getReader()
         )) {
-          fullText += delta;
+          const chunk = delta as string;
+          fullText += chunk;
+
+          if (isStreamingText) {
+            writeSseEvent(res, 'response.output_text.delta', {
+              type: 'response.output_text.delta',
+              item_id: itemId,
+              output_index: outputIndex,
+              content_index: contentIndex,
+              delta: chunk,
+              sequence_number: seq++,
+            });
+            continue;
+          }
+
+          // <think> ブロックの簡易判定
+          if (fullText.includes('<think>') && !fullText.includes('</think>')) {
+            inThinkBlock = true;
+            continue;
+          } else if (fullText.includes('</think>')) {
+            inThinkBlock = false;
+          }
+
+          if (inThinkBlock) continue;
+
+          const processedText = fullText
+            .replace(/<think>[\s\S]*?<\/think>/gi, '')
+            .trim();
+
+          // まだテキストが十分にない場合は判定を保留
+          if (processedText.length < 5) continue;
+
+          // ツールコールの候補かどうかの判定
+          if (
+            processedText.startsWith('{') ||
+            processedText.startsWith('[Tool call:') ||
+            processedText.startsWith('```')
+          ) {
+            // ツールコールの可能性が高いのでバッファリングを継続
+            isToolCallCandidate = true;
+          } else {
+            // 通常のテキストメッセージと判定
+            isToolCallCandidate = false;
+            isStreamingText = true;
+
+            // 1. response.output_item.added (message)
+            writeSseEvent(res, 'response.output_item.added', {
+              type: 'response.output_item.added',
+              output_index: outputIndex,
+              item: {
+                id: itemId,
+                type: 'message',
+                status: 'in_progress',
+                role: 'assistant',
+                content: [],
+              },
+              sequence_number: seq++,
+            });
+
+            // 2. response.content_part.added
+            writeSseEvent(res, 'response.content_part.added', {
+              type: 'response.content_part.added',
+              item_id: itemId,
+              output_index: outputIndex,
+              content_index: contentIndex,
+              part: { type: 'output_text', text: '', annotations: [] },
+              sequence_number: seq++,
+            });
+
+            // 3. 蓄積していたテキストを送信
+            if (processedText) {
+              writeSseEvent(res, 'response.output_text.delta', {
+                type: 'response.output_text.delta',
+                item_id: itemId,
+                output_index: outputIndex,
+                content_index: contentIndex,
+                delta: processedText,
+                sequence_number: seq++,
+              });
+            }
+          }
         }
       }
 
-      // <think>ブロックを除去してツールコールを検出
-      const processedText = fullText
-        .replace(/<think>[\s\S]*?<\/think>/gi, '')
-        .trim();
-      const toolCall = detectToolCall(processedText, body.tools ?? []);
+      if (isToolCallCandidate) {
+        const processedText = fullText
+          .replace(/<think>[\s\S]*?<\/think>/gi, '')
+          .trim();
+        const toolCall = detectToolCall(processedText, body.tools ?? []);
 
-      if (toolCall) {
-        // ===== function_call イベントシーケンス（OpenAI Responses API 仕様準拠）=====
-        const fcId = `fc_${genId()}`;
-        const callId = `call_${genId()}`;
-        const argsStr = toolCall.arguments;
-        let seq = 1;
+        if (toolCall) {
+          // ===== function_call イベントシーケンス（OpenAI Responses API 仕様準拠）=====
+          const fcId = `fc_${genId()}`;
+          const callId = `call_${genId()}`;
+          const argsStr = toolCall.arguments;
+          let seq = 1;
 
-        // 1. response.output_item.added (function_call, in_progress)
-        writeSseEvent(res, 'response.output_item.added', {
-          type: 'response.output_item.added',
-          output_index: outputIndex,
-          item: {
-            id: fcId,
-            type: 'function_call',
-            status: 'in_progress',
+          // 1. response.output_item.added (function_call, in_progress)
+          writeSseEvent(res, 'response.output_item.added', {
+            type: 'response.output_item.added',
+            output_index: outputIndex,
+            item: {
+              id: fcId,
+              type: 'function_call',
+              status: 'in_progress',
+              name: toolCall.name,
+              call_id: callId,
+              arguments: '',
+            },
+            sequence_number: seq++,
+          });
+
+          // 2. response.function_call_arguments.delta
+          writeSseEvent(res, 'response.function_call_arguments.delta', {
+            type: 'response.function_call_arguments.delta',
+            item_id: fcId,
+            output_index: outputIndex,
+            delta: argsStr,
+            sequence_number: seq++,
+          });
+
+          // 3. response.function_call_arguments.done
+          writeSseEvent(res, 'response.function_call_arguments.done', {
+            type: 'response.function_call_arguments.done',
+            item_id: fcId,
             name: toolCall.name,
-            call_id: callId,
-            arguments: '',
-          },
-          sequence_number: seq++,
-        });
-
-        // 2. response.function_call_arguments.delta
-        writeSseEvent(res, 'response.function_call_arguments.delta', {
-          type: 'response.function_call_arguments.delta',
-          item_id: fcId,
-          output_index: outputIndex,
-          delta: argsStr,
-          sequence_number: seq++,
-        });
-
-        // 3. response.function_call_arguments.done
-        writeSseEvent(res, 'response.function_call_arguments.done', {
-          type: 'response.function_call_arguments.done',
-          item_id: fcId,
-          name: toolCall.name,
-          output_index: outputIndex,
-          arguments: argsStr,
-          sequence_number: seq++,
-        });
-
-        // 4. response.output_item.done (function_call, completed)
-        writeSseEvent(res, 'response.output_item.done', {
-          type: 'response.output_item.done',
-          output_index: outputIndex,
-          item: {
-            id: fcId,
-            type: 'function_call',
-            status: 'completed',
-            name: toolCall.name,
-            call_id: callId,
+            output_index: outputIndex,
             arguments: argsStr,
-          },
-          sequence_number: seq++,
-        });
+            sequence_number: seq++,
+          });
 
-        // 5. response.completed
-        writeSseEvent(res, 'response.completed', {
-          type: 'response.completed',
-          sequence_number: seq++,
-          response: {
-            id: responseId,
-            object: 'response',
-            created_at: created,
-            status: 'completed',
-            model: resolved.name,
-            output: [
-              {
-                id: fcId,
-                type: 'function_call',
-                status: 'completed',
-                name: toolCall.name,
-                call_id: callId,
-                arguments: argsStr,
-              },
-            ],
-          },
-        });
-      } else {
-        // ===== テキストレスポンス イベントシーケンス =====
-        const itemId = `msg_${genId()}`;
-        const contentIndex = 0;
-        let seq = 1;
+          // 4. response.output_item.done (function_call, completed)
+          writeSseEvent(res, 'response.output_item.done', {
+            type: 'response.output_item.done',
+            output_index: outputIndex,
+            item: {
+              id: fcId,
+              type: 'function_call',
+              status: 'completed',
+              name: toolCall.name,
+              call_id: callId,
+              arguments: argsStr,
+            },
+            sequence_number: seq++,
+          });
 
-        // 1. response.output_item.added (message)
-        writeSseEvent(res, 'response.output_item.added', {
-          type: 'response.output_item.added',
-          output_index: outputIndex,
-          item: {
-            id: itemId,
-            type: 'message',
-            status: 'in_progress',
-            role: 'assistant',
-            content: [],
-          },
-          sequence_number: seq++,
-        });
+          // 5. response.completed
+          writeSseEvent(res, 'response.completed', {
+            type: 'response.completed',
+            sequence_number: seq++,
+            response: {
+              id: responseId,
+              object: 'response',
+              created_at: created,
+              status: 'completed',
+              model: resolved.name,
+              output: [
+                {
+                  id: fcId,
+                  type: 'function_call',
+                  status: 'completed',
+                  name: toolCall.name,
+                  call_id: callId,
+                  arguments: argsStr,
+                },
+              ],
+            },
+          });
+        } else {
+          // ツールコール候補だったが、最終的にツールコールとして検出されなかった場合
+          // 1. response.output_item.added (message)
+          writeSseEvent(res, 'response.output_item.added', {
+            type: 'response.output_item.added',
+            output_index: outputIndex,
+            item: {
+              id: itemId,
+              type: 'message',
+              status: 'in_progress',
+              role: 'assistant',
+              content: [],
+            },
+            sequence_number: seq++,
+          });
 
-        // 2. response.content_part.added
-        writeSseEvent(res, 'response.content_part.added', {
-          type: 'response.content_part.added',
-          item_id: itemId,
-          output_index: outputIndex,
-          content_index: contentIndex,
-          part: { type: 'output_text', text: '', annotations: [] },
-          sequence_number: seq++,
-        });
-
-        // 3. response.output_text.delta（バッファ済みテキストを一括送信）
-        if (processedText) {
-          writeSseEvent(res, 'response.output_text.delta', {
-            type: 'response.output_text.delta',
+          // 2. response.content_part.added
+          writeSseEvent(res, 'response.content_part.added', {
+            type: 'response.content_part.added',
             item_id: itemId,
             output_index: outputIndex,
             content_index: contentIndex,
-            delta: processedText,
+            part: { type: 'output_text', text: '', annotations: [] },
             sequence_number: seq++,
           });
+
+          // 3. response.output_text.delta（バッファ済みテキストを一括送信）
+          if (processedText) {
+            writeSseEvent(res, 'response.output_text.delta', {
+              type: 'response.output_text.delta',
+              item_id: itemId,
+              output_index: outputIndex,
+              content_index: contentIndex,
+              delta: processedText,
+              sequence_number: seq++,
+            });
+          }
+
+          // 4. response.output_text.done
+          writeSseEvent(res, 'response.output_text.done', {
+            type: 'response.output_text.done',
+            item_id: itemId,
+            output_index: outputIndex,
+            content_index: contentIndex,
+            text: processedText,
+            sequence_number: seq++,
+          });
+
+          // 5. response.content_part.done
+          writeSseEvent(res, 'response.content_part.done', {
+            type: 'response.content_part.done',
+            item_id: itemId,
+            output_index: outputIndex,
+            content_index: contentIndex,
+            part: { type: 'output_text', text: processedText, annotations: [] },
+            sequence_number: seq++,
+          });
+
+          // 6. response.output_item.done (message, completed)
+          writeSseEvent(res, 'response.output_item.done', {
+            type: 'response.output_item.done',
+            output_index: outputIndex,
+            item: {
+              id: itemId,
+              type: 'message',
+              status: 'completed',
+              role: 'assistant',
+              content: [
+                { type: 'output_text', text: processedText, annotations: [] },
+              ],
+            },
+            sequence_number: seq++,
+          });
+
+          // 7. response.completed
+          writeSseEvent(res, 'response.completed', {
+            type: 'response.completed',
+            sequence_number: seq++,
+            response: {
+              id: responseId,
+              object: 'response',
+              created_at: created,
+              status: 'completed',
+              model: resolved.name,
+              output: [
+                {
+                  id: itemId,
+                  type: 'message',
+                  status: 'completed',
+                  role: 'assistant',
+                  content: [
+                    {
+                      type: 'output_text',
+                      text: processedText,
+                      annotations: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          });
         }
+      } else {
+        // 通常のテキストストリーミングの終了処理
+        const processedText = fullText
+          .replace(/<think>[\s\S]*?<\/think>/gi, '')
+          .trim();
 
         // 4. response.output_text.done
         writeSseEvent(res, 'response.output_text.done', {

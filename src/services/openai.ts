@@ -84,14 +84,22 @@ export const normalizeResponsesBodyToOpenAiMessages = (
     }
 
     if (item.type === 'message' && typeof item.role === 'string') {
-      const text = extractTextFromResponsesContent(item.content);
-      if (text) msgs.push({ role: item.role, content: text });
+      if (Array.isArray(item.content)) {
+        msgs.push({ role: item.role, content: item.content });
+      } else {
+        const text = extractTextFromResponsesContent(item.content);
+        if (text) msgs.push({ role: item.role, content: text });
+      }
       continue;
     }
 
     if (typeof item.role === 'string') {
-      const text = extractTextFromResponsesContent(item.content);
-      if (text) msgs.push({ role: item.role, content: text });
+      if (Array.isArray(item.content)) {
+        msgs.push({ role: item.role, content: item.content });
+      } else {
+        const text = extractTextFromResponsesContent(item.content);
+        if (text) msgs.push({ role: item.role, content: text });
+      }
       continue;
     }
 
@@ -371,35 +379,107 @@ export const detectToolCall = (text: string, tools: any[]): ToolCall | null => {
   return null;
 };
 
-export const normalizeMessagesToBlackboxShape = (
+export const normalizeMessagesToBlackboxShape = async (
   messages: any[],
   modelLabel: string
-): BlackboxMessage[] => {
+): Promise<BlackboxMessage[]> => {
   if (!Array.isArray(messages)) return [];
   const allowed = new Set(['system', 'user', 'assistant']);
   const nowIso = new Date().toISOString();
 
-  return messages
-    .filter((m) => m && typeof m === 'object')
-    .map((m) => {
-      const role = String(m.role ?? '');
-      const content =
-        typeof m.content === 'string' ? m.content : String(m.content ?? '');
+  const { fetchImageAsBase64 } = await import('../utils/utils');
 
-      const id = typeof m.id === 'string' && m.id ? m.id : genShortId();
-      const createdAt =
-        typeof m.createdAt === 'string' && m.createdAt ? m.createdAt : nowIso;
+  const normalizedMessages = await Promise.all(
+    messages
+      .filter((m) => m && typeof m === 'object')
+      .map(async (m) => {
+        const role = String(m.role ?? '');
+        let content = '';
+        let data: any = undefined;
 
-      const finalModelLabel =
-        typeof m.modelLabel === 'string' && m.modelLabel
-          ? m.modelLabel
-          : role === 'assistant'
-            ? modelLabel
-            : undefined;
+        if (typeof m.content === 'string') {
+          content = m.content;
+        } else if (Array.isArray(m.content)) {
+          const textParts = [];
+          const imagesData = [];
 
-      return { id, createdAt, content, role, modelLabel: finalModelLabel };
-    })
-    .filter((m) => allowed.has(m.role) && m.content.length > 0);
+          for (const part of m.content) {
+            if (
+              (part.type === 'text' || part.type === 'input_text') &&
+              typeof part.text === 'string'
+            ) {
+              textParts.push(part.text);
+            } else if (part.type === 'image_url' && part.image_url?.url) {
+              let url = part.image_url.url;
+              if (url.startsWith('http://') || url.startsWith('https://')) {
+                const base64 = await fetchImageAsBase64(url);
+                if (base64) url = base64;
+              }
+              imagesData.push({
+                filePath: `MultipleFiles/image_${imagesData.length}.png`,
+                contents: url,
+              });
+            } else if (
+              part.type === 'input_image' &&
+              typeof part.image_url === 'string'
+            ) {
+              let url = part.image_url;
+              if (url.startsWith('http://') || url.startsWith('https://')) {
+                const base64 = await fetchImageAsBase64(url);
+                if (base64) url = base64;
+              }
+              imagesData.push({
+                filePath: `MultipleFiles/image_${imagesData.length}.png`,
+                contents: url,
+              });
+            }
+          }
+
+          content = textParts.join('\n');
+          if (imagesData.length > 0) {
+            console.log(
+              `[Vision] Extracted ${imagesData.length} image(s) from message`
+            );
+            data = {
+              imagesData,
+              fileText: '',
+              title: '',
+            };
+          }
+        } else {
+          content = String(m.content ?? '');
+        }
+
+        const id = typeof m.id === 'string' && m.id ? m.id : genShortId();
+        const createdAt =
+          typeof m.createdAt === 'string' && m.createdAt ? m.createdAt : nowIso;
+
+        const finalModelLabel =
+          typeof m.modelLabel === 'string' && m.modelLabel
+            ? m.modelLabel
+            : role === 'assistant'
+              ? modelLabel
+              : undefined;
+
+        const result: BlackboxMessage = {
+          id,
+          createdAt,
+          content,
+          role,
+          modelLabel: finalModelLabel,
+        };
+        if (data) {
+          result.data = data;
+        }
+        return result;
+      })
+  );
+
+  return normalizedMessages.filter(
+    (m) =>
+      allowed.has(m.role) &&
+      (m.content.length > 0 || m.data?.imagesData?.length)
+  );
 };
 
 export const makeChatCompletionChunk = ({

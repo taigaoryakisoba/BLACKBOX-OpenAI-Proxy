@@ -11,10 +11,21 @@ export interface ToolCall {
 
 export interface OpenAIMessage {
   role: string;
-  content: string;
+  content: string | any[];
   id?: string;
   createdAt?: string;
   modelLabel?: string;
+}
+
+export interface BlackboxImageData {
+  filePath: string;
+  contents: string;
+}
+
+export interface BlackboxMessageData {
+  imagesData?: BlackboxImageData[];
+  fileText?: string;
+  title?: string;
 }
 
 export interface BlackboxMessage {
@@ -23,4 +34,5 @@ export interface BlackboxMessage {
   content: string;
   role: string;
   modelLabel?: string;
+  data?: BlackboxMessageData;
 }

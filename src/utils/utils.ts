@@ -182,3 +182,25 @@ export const writeSseDone = (res: any) => {
 };
 
 export const nowUnix = (): number => Math.floor(Date.now() / 1000);
+
+export const fetchImageAsBase64 = async (
+  url: string
+): Promise<string | null> => {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.error(
+        `Failed to fetch image from ${url}: ${response.status} ${response.statusText}`
+      );
+      return null;
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
+    const base64 = buffer.toString('base64');
+    return `data:${contentType};base64,${base64}`;
+  } catch (error) {
+    console.error(`Error fetching image from ${url}:`, error);
+    return null;
+  }
+};
