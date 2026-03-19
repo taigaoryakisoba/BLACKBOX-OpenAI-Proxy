@@ -9,7 +9,6 @@ import {
   resolveModel,
   genId,
   genShortId,
-  logDebug,
   extractAIResponse,
   nowUnix,
   setSseHeaders,
@@ -32,6 +31,7 @@ import {
   callBlackboxAPIJson,
   callBlackboxAPIStream,
 } from '../../../api/blackboxai';
+import logger from '../../../services/logger';
 
 export const chatCompletions = async (req: Request, res: Response) => {
   const startTime = Date.now();
@@ -92,8 +92,7 @@ export const chatCompletions = async (req: Request, res: Response) => {
     maxTokens,
   });
 
-  logDebug(
-    DEBUG_LOG,
+  logger.debug(
     `[${reqId}] [CHAT] resolvedModel=${resolved.name} messages=${messages.length} chatId=${chatId} maxTokens=${maxTokens} stream=${Boolean(
       body.stream
     )}`
@@ -125,7 +124,6 @@ export const chatCompletions = async (req: Request, res: Response) => {
         payload,
         { reqId, signal: abortController.signal },
         {
-          logDebug: (...args: any[]) => logDebug(DEBUG_LOG, ...args),
           safeJson,
           redactHeaders,
           DEBUG_MAX_CHARS,
@@ -266,7 +264,7 @@ export const chatCompletions = async (req: Request, res: Response) => {
       return res.end();
     } catch (error: any) {
       if (isAbortError(error)) return;
-      console.error(`[${reqId}] [/v1/chat/completions stream] Error:`, error);
+      logger.error(`[${reqId}] [/v1/chat/completions stream] Error:`, error);
       if (!res.writableEnded) {
         res.write(
           `data: ${JSON.stringify({ error: { message: error?.message ?? 'Unknown error', type: 'internal_server_error', code: error?.status ? `upstream_${error.status}` : null } })}\n\n`
@@ -283,7 +281,6 @@ export const chatCompletions = async (req: Request, res: Response) => {
       payload,
       { reqId },
       {
-        logDebug: (...args: any[]) => logDebug(DEBUG_LOG, ...args),
         safeJson,
         redactHeaders,
         DEBUG_MAX_CHARS,
@@ -346,7 +343,7 @@ export const chatCompletions = async (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    console.error(`[${reqId}] [/v1/chat/completions] Error:`, error);
+    logger.error(`[${reqId}] [/v1/chat/completions] Error:`, error);
     return res.status(500).json({
       error: {
         message: error?.message ?? 'Unknown error',

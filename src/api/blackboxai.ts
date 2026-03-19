@@ -9,6 +9,7 @@ import {
   SUBSCRIPTION_CUSTOMER_ID,
   VALIDATION_TOKEN,
 } from '../configs/env';
+import logger from '../services/logger';
 
 export const buildBlackboxPayload = ({
   chatId,
@@ -91,15 +92,15 @@ export const buildBlackboxPayload = ({
 export const callBlackboxAPIJson = async (
   payload: any,
   ctx: any = {},
-  { logDebug, safeJson, redactHeaders, DEBUG_MAX_CHARS }: any
+  { safeJson, redactHeaders, DEBUG_MAX_CHARS }: any
 ) => {
   const reqId = ctx.reqId ?? 'n/a';
 
-  logDebug(`[${reqId}] [UPSTREAM REQUEST] POST ${API_ENDPOINT}`);
-  logDebug(
+  logger.debug(`[${reqId}] [UPSTREAM REQUEST] POST ${API_ENDPOINT}`);
+  logger.debug(
     `[${reqId}] [UPSTREAM REQUEST] headers=${safeJson(redactHeaders(BASE_HEADERS), DEBUG_MAX_CHARS)}`
   );
-  logDebug(
+  logger.debug(
     `[${reqId}] [UPSTREAM REQUEST] payload=${safeJson(payload, DEBUG_MAX_CHARS)}`
   );
 
@@ -113,8 +114,8 @@ export const callBlackboxAPIJson = async (
   const statusText = response.statusText;
 
   const rawText = await response.text().catch(() => '');
-  logDebug(`[${reqId}] [UPSTREAM RESPONSE] status=${status} ${statusText}`);
-  logDebug(
+  logger.debug(`[${reqId}] [UPSTREAM RESPONSE] status=${status} ${statusText}`);
+  logger.debug(
     `[${reqId}] [UPSTREAM RESPONSE] body=${rawText.length ? rawText.slice(0, DEBUG_MAX_CHARS) : ''}${rawText.length > DEBUG_MAX_CHARS ? '... (truncated)' : ''}`
   );
 
@@ -135,16 +136,16 @@ export const callBlackboxAPIJson = async (
 export const callBlackboxAPIStream = async (
   payload: any,
   ctx: any = {},
-  { logDebug, safeJson, redactHeaders, DEBUG_MAX_CHARS }: any
+  { safeJson, redactHeaders, DEBUG_MAX_CHARS }: any
 ) => {
   const reqId = ctx.reqId ?? 'n/a';
   const signal = ctx.signal;
 
-  logDebug(`[${reqId}] [UPSTREAM REQUEST] POST ${API_ENDPOINT} (stream)`);
-  logDebug(
+  logger.debug(`[${reqId}] [UPSTREAM REQUEST] POST ${API_ENDPOINT} (stream)`);
+  logger.debug(
     `[${reqId}] [UPSTREAM REQUEST] headers=${safeJson(redactHeaders(BASE_HEADERS), DEBUG_MAX_CHARS)}`
   );
-  logDebug(
+  logger.debug(
     `[${reqId}] [UPSTREAM REQUEST] payload=${safeJson(payload, DEBUG_MAX_CHARS)}`
   );
 
@@ -155,7 +156,7 @@ export const callBlackboxAPIStream = async (
     signal,
   });
 
-  logDebug(
+  logger.debug(
     `[${reqId}] [UPSTREAM RESPONSE] status=${response.status} ${response.statusText} (stream)`
   );
 

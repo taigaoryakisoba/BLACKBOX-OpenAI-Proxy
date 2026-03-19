@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import logger from '../services/logger';
 
 export const isAbortError = (err: any): boolean => {
   return (
@@ -42,11 +43,6 @@ export const redactHeaders = (
   return out;
 };
 
-export const logDebug = (DEBUG_LOG: boolean, ...args: any[]) => {
-  if (!DEBUG_LOG) return;
-  console.debug(...args);
-};
-
 export const resolveModel = (
   MODEL_CONFIG: Record<string, any>,
   model: string
@@ -69,7 +65,7 @@ export const extractAIResponse = (
   else if (data.text) raw = String(data.text);
   else return 'Response received but in an unexpected format';
 
-  console.log(
+  logger.debug(
     `[extractAIResponse] raw before processing: ${safeJson(raw, DEBUG_MAX_CHARS)}`
   );
 
@@ -84,19 +80,19 @@ export const extractAIResponse = (
         const value = jsonObj[keys[0]];
         const result =
           typeof value === 'string' ? value : JSON.stringify(value);
-        console.log(
+        logger.debug(
           `[extractAIResponse] extracted single-key value: ${result}`
         );
         return result;
       }
-      console.log(`[extractAIResponse] extracted JSON: ${jsonMatch[0]}`);
+      logger.debug(`[extractAIResponse] extracted JSON: ${jsonMatch[0]}`);
       return jsonMatch[0];
     } catch (e: any) {
-      console.log(`[extractAIResponse] JSON parse error: ${e.message}`);
+      logger.debug(`[extractAIResponse] JSON parse error: ${e.message}`);
     }
   }
 
-  console.log(
+  logger.debug(
     `[extractAIResponse] final raw: ${safeJson(raw, DEBUG_MAX_CHARS)}`
   );
   return raw;
@@ -189,7 +185,7 @@ export const fetchImageAsBase64 = async (
   try {
     const response = await fetch(url);
     if (!response.ok) {
-      console.error(
+      logger.error(
         `Failed to fetch image from ${url}: ${response.status} ${response.statusText}`
       );
       return null;
@@ -200,7 +196,7 @@ export const fetchImageAsBase64 = async (
     const base64 = buffer.toString('base64');
     return `data:${contentType};base64,${base64}`;
   } catch (error) {
-    console.error(`Error fetching image from ${url}:`, error);
+    logger.error(`Error fetching image from ${url}:`, error);
     return null;
   }
 };

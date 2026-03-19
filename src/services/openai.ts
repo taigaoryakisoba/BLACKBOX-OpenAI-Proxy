@@ -1,6 +1,7 @@
 import { ToolCall, OpenAIMessage, BlackboxMessage } from '../types';
 import { ChatCompletionChunk, ErrorResponse } from '../models';
 import { genShortId } from '../utils/utils';
+import logger from './logger';
 
 export const extractTextFromResponsesContent = (content: any): string => {
   if (typeof content === 'string') return content;
@@ -437,7 +438,7 @@ export const normalizeMessagesToBlackboxShape = async (
 
           content = textParts.join('\n');
           if (imagesData.length > 0) {
-            console.log(
+            logger.debug(
               `[Vision] Extracted ${imagesData.length} image(s) from message`
             );
             data = {

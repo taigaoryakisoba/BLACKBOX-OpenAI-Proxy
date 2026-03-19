@@ -9,7 +9,6 @@ import {
   resolveModel,
   genId,
   genShortId,
-  logDebug,
   extractAIResponse,
   nowUnix,
   setSseHeaders,
@@ -31,6 +30,7 @@ import {
   callBlackboxAPIJson,
   callBlackboxAPIStream,
 } from '../../../api/blackboxai';
+import logger from '../../../services/logger';
 
 export const responses = async (req: Request, res: Response) => {
   const body = req.body ?? {};
@@ -86,8 +86,7 @@ export const responses = async (req: Request, res: Response) => {
     maxTokens: MAX_TOKENS_DEFAULT,
   });
 
-  logDebug(
-    DEBUG_LOG,
+  logger.debug(
     `[${reqId}] [RESPONSES] resolvedModel=${resolved.name} messages=${messages.length} chatId=${chatId} stream=${Boolean(
       body.stream
     )}`
@@ -135,7 +134,6 @@ export const responses = async (req: Request, res: Response) => {
         payload,
         { reqId, signal: abortController.signal },
         {
-          logDebug: (...args: any[]) => logDebug(DEBUG_LOG, ...args),
           safeJson,
           redactHeaders,
           DEBUG_MAX_CHARS,
@@ -495,14 +493,11 @@ export const responses = async (req: Request, res: Response) => {
       return res.end();
     } catch (error: any) {
       if (isAbortError(error)) {
-        logDebug(
-          DEBUG_LOG,
-          `[${reqId}] [/v1/responses stream] aborted by client`
-        );
+        logger.debug(`[${reqId}] [/v1/responses stream] aborted by client`);
         return;
       }
 
-      console.error(`[${reqId}] [/v1/responses stream] Error:`, error);
+      logger.error(`[${reqId}] [/v1/responses stream] Error:`, error);
 
       if (!res.writableEnded) {
         writeSseEvent(res, 'response.failed', {
@@ -532,7 +527,6 @@ export const responses = async (req: Request, res: Response) => {
       payload,
       { reqId },
       {
-        logDebug: (...args: any[]) => logDebug(DEBUG_LOG, ...args),
         safeJson,
         redactHeaders,
         DEBUG_MAX_CHARS,
@@ -586,7 +580,7 @@ export const responses = async (req: Request, res: Response) => {
       ],
     });
   } catch (error: any) {
-    console.error(`[${reqId}] [/v1/responses] Error:`, error);
+    logger.error(`[${reqId}] [/v1/responses] Error:`, error);
     return res.status(500).json({
       error: {
         message: error?.message ?? 'Unknown error',
