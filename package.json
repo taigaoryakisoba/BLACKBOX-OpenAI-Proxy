@@ -13,7 +13,8 @@
     "lint:fix": "npm run lint -- --fix",
     "wintest": "title %npm_config_id% && npm run build && node ./dist/index.js",
     "winstart": "title %npm_config_id% && node ./dist/index.js",
-    "start": "node ./dist/index.js"
+    "start": "node ./dist/index.js",
+    "models:generate": "node ./scripts/generate-models-from-md.js"
   },
   "license": "MIT",
   "dependencies": {
