@@ -5,6 +5,10 @@ export interface ModelConfig {
 }
 
 export const MODEL_CONFIG: Record<string, ModelConfig> = {
+  'blackbox/free': {
+    name: 'blackbox/free',
+    mode: true,
+  },
   'anthropic/claude-sonnet-4.6': {
     name: 'anthropic/claude-sonnet-4.6',
     mode: true,

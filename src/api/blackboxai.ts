@@ -22,6 +22,8 @@ export const buildBlackboxPayload = ({
   messages: any[];
   maxTokens: number;
 }) => {
+  if (agentMode.name === 'blackbox/free') agentMode = undefined;
+
   return {
     messages,
     agentMode,
@@ -45,7 +47,7 @@ export const buildBlackboxPayload = ({
     isMemoryEnabled: false,
     mobileClient: false,
 
-    userSelectedModel: agentMode.name,
+    // userSelectedModel: agentMode.name,
     userSelectedAgent: DEFAULT_USER_SELECTED_AGENT,
     validated: VALIDATION_TOKEN,
 
