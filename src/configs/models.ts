@@ -897,6 +897,10 @@ export const MODEL_CONFIG: Record<string, ModelConfig> = {
     name: 'openai/gpt-5.2-pro',
     mode: true,
   },
+  'openai/gpt-5.3-codex': {
+    name: 'openai/gpt-5.3-codex',
+    mode: true,
+  },
   'openai/gpt-5.4': {
     name: 'openai/gpt-5.4',
     mode: true,
