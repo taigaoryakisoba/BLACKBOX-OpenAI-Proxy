@@ -70,7 +70,7 @@ npm start
 | `DEBUG_LOG` | `false` | デバッグログを有効化 |
 | `DEBUG_MAX_CHARS` | `10` | デバッグログの最大文字数 |
 
-`BLACKBOX_SESSION_TOKEN` は有料アカウントを利用していない場合は必要ありません。
+`BLACKBOX_CUSTOMER_ID` は有料アカウントを利用していない場合は必要ありません。
 有料アカウントの場合は、開発者モードで以下のスクリプトを実行し、取得した値を入れてください。  
 ```js
 console.log(JSON.parse(localStorage.getItem('subscription-cache') || '{}').customerId);
