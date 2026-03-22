@@ -1,4 +1,4 @@
-import { Express, Request, Response, NextFunction } from 'express';
+import { Request, Response, NextFunction } from 'express';
 import logger from '../services/logger';
 
 // ログミドルウェアを作成

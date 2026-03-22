@@ -17,8 +17,6 @@ export const DEFAULT_USER_SELECTED_AGENT =
   process.env.BLACKBOX_USER_SELECTED_AGENT ?? 'VscodeAgent';
 export const DEFAULT_GITHUB_TOKEN = process.env.BLACKBOX_GITHUB_TOKEN ?? '';
 export const DEFAULT_WORKSPACE_ID = process.env.BLACKBOX_WORKSPACE_ID ?? '';
-export const DEFAULT_IS_PREMIUM =
-  (process.env.BLACKBOX_IS_PREMIUM ?? 'true') === 'true';
 
 export const DEBUG_LOG = (process.env.DEBUG_LOG ?? 'false') === 'true';
 export const DEBUG_MAX_CHARS = Number(process.env.DEBUG_MAX_CHARS ?? 10);

@@ -1,7 +1,6 @@
 import { Request, Response } from 'express';
 import {
   MAX_TOKENS_DEFAULT,
-  DEBUG_LOG,
   DEBUG_MAX_CHARS,
 } from '../../../configs/env';
 import { MODEL_CONFIG } from '../../../configs/models';
@@ -56,7 +55,10 @@ export const chatCompletions = async (req: Request, res: Response) => {
   // ツール定義がある場合、システムプロンプトにツール使用方法を注入する
   const openAiMessages = Array.isArray(body.messages) ? [...body.messages] : [];
   if (Array.isArray(body.tools) && body.tools.length > 0) {
-    const toolPrompt = buildToolSystemPrompt(body.tools);
+    const toolPrompt = buildToolSystemPrompt(body.tools, {
+      parallelToolCalls: body.parallel_tool_calls,
+      toolChoice: body.tool_choice,
+    });
     if (toolPrompt) {
       const sysIdx = openAiMessages.findIndex((m) => m.role === 'system');
       if (sysIdx >= 0) {
@@ -163,8 +165,14 @@ export const chatCompletions = async (req: Request, res: Response) => {
             const idx1 = remainingText.indexOf('{');
             const idx2 = remainingText.indexOf('[Tool call:');
             const idx3 = remainingText.indexOf('```');
+            const idx4 = remainingText.indexOf('*** Begin Patch');
+            const idx5 = remainingText.indexOf('// codex-js-repl:');
+            const idx6 = remainingText.indexOf('// codex-artifact-tool:');
+            const idx7 = remainingText.indexOf('// @exec:');
 
-            const indices = [idx1, idx2, idx3].filter((i) => i !== -1);
+            const indices = [idx1, idx2, idx3, idx4, idx5, idx6, idx7].filter(
+              (i) => i !== -1
+            );
 
             if (indices.length > 0) {
               isToolCallCandidate = true;

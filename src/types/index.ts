@@ -5,8 +5,10 @@ export interface ModelConfig {
 }
 
 export interface ToolCall {
+  kind?: string;
   name: string;
   arguments: string;
+  payload?: any;
 }
 
 export interface OpenAIMessage {

@@ -1,15 +1,10 @@
 import { Request, Response } from 'express';
-import {
-  MAX_TOKENS_DEFAULT,
-  DEBUG_LOG,
-  DEBUG_MAX_CHARS,
-} from '../../../configs/env';
+import { MAX_TOKENS_DEFAULT, DEBUG_MAX_CHARS } from '../../../configs/env';
 import { MODEL_CONFIG } from '../../../configs/models';
 import {
   resolveModel,
   genId,
   genShortId,
-  extractAIResponse,
   nowUnix,
   setSseHeaders,
   writeSseEvent,
@@ -17,20 +12,469 @@ import {
   readUpstreamDeltas,
   safeJson,
   redactHeaders,
+  extractRawAIResponse,
 } from '../../../utils/utils';
 import {
-  normalizeResponsesBodyToOpenAiMessages,
+  coerceResponsesInputToArray,
+  normalizeResponsesInputToOpenAiMessages,
   normalizeMessagesToBlackboxShape,
   sendOpenAIError,
   buildToolSystemPrompt,
   detectToolCalls,
+  extractThinkingSections,
+  findFirstToolCallIndex,
 } from '../../../services/openai';
+import responsesStore from '../../../services/responses-store';
 import {
   buildBlackboxPayload,
   callBlackboxAPIJson,
   callBlackboxAPIStream,
 } from '../../../api/blackboxai';
 import logger from '../../../services/logger';
+
+const getReasoningEffort = (body: any): string | null => {
+  if (typeof body?.reasoning?.effort === 'string') return body.reasoning.effort;
+  if (typeof body?.reasoning_effort === 'string') return body.reasoning_effort;
+  return null;
+};
+
+const shouldIncludeReasoningSummary = (body: any): boolean => {
+  const summary = body?.reasoning?.summary;
+  return typeof summary === 'string' ? summary !== 'none' : false;
+};
+
+const shouldIncludeEncryptedReasoning = (body: any): boolean => {
+  return Array.isArray(body?.include)
+    ? body.include.includes('reasoning.encrypted_content')
+    : false;
+};
+
+const buildReasoningItem = (
+  reasoningText: string,
+  includeEncryptedReasoning: boolean
+) => {
+  const trimmed = reasoningText.trim();
+  if (!trimmed) return null;
+
+  return {
+    id: `rs_${genId()}`,
+    type: 'reasoning',
+    summary: [{ type: 'summary_text', text: trimmed }],
+    content: [{ type: 'reasoning_text', text: trimmed }],
+    encrypted_content: includeEncryptedReasoning ? trimmed : null,
+  };
+};
+
+const buildMessageItem = (text: string) => ({
+  id: `msg_${genId()}`,
+  type: 'message',
+  status: 'completed',
+  role: 'assistant',
+  content: [{ type: 'output_text', text, annotations: [] }],
+});
+
+const parseJsonObject = (input: string, fallback: any = {}) => {
+  try {
+    return JSON.parse(input);
+  } catch {
+    return fallback;
+  }
+};
+
+const buildToolResponseItem = (toolCall: any) => {
+  const callId = `call_${genId()}`;
+  const kind = toolCall.kind ?? 'function';
+
+  if (kind === 'custom') {
+    return {
+      outputItem: {
+        id: `ctc_${genId()}`,
+        type: 'custom_tool_call',
+        status: 'completed',
+        call_id: callId,
+        name: toolCall.name,
+        input: toolCall.arguments,
+      },
+      callId,
+    };
+  }
+
+  if (kind === 'local_shell') {
+    const payload = parseJsonObject(toolCall.arguments, {});
+    return {
+      outputItem: {
+        type: 'local_shell_call',
+        call_id: callId,
+        status: 'completed',
+        action: {
+          type: 'exec',
+          command: Array.isArray(payload.command) ? payload.command : [],
+          timeout_ms:
+            typeof payload.timeout_ms === 'number' ? payload.timeout_ms : null,
+          working_directory:
+            typeof payload.workdir === 'string' ? payload.workdir : null,
+          env: null,
+          user: null,
+        },
+      },
+      callId,
+    };
+  }
+
+  if (kind === 'tool_search') {
+    return {
+      outputItem: {
+        id: `ts_${genId()}`,
+        type: 'tool_search_call',
+        call_id: callId,
+        status: 'completed',
+        execution: 'client',
+        arguments: parseJsonObject(toolCall.arguments, {}),
+      },
+      callId,
+    };
+  }
+
+  if (kind === 'web_search') {
+    const payload = parseJsonObject(toolCall.arguments, {});
+    return {
+      outputItem: {
+        id: `ws_${genId()}`,
+        type: 'web_search_call',
+        status: 'completed',
+        action: {
+          type: 'search',
+          query:
+            typeof payload.query === 'string'
+              ? payload.query
+              : Array.isArray(payload.queries)
+                ? payload.queries[0] ?? null
+                : null,
+          queries: Array.isArray(payload.queries) ? payload.queries : null,
+        },
+      },
+      callId,
+    };
+  }
+
+  if (kind === 'image_generation') {
+    const payload = parseJsonObject(toolCall.arguments, {});
+    return {
+      outputItem: {
+        id: `ig_${genId()}`,
+        type: 'image_generation_call',
+        status: 'completed',
+        revised_prompt:
+          typeof payload.prompt === 'string' ? payload.prompt : undefined,
+        result: '',
+      },
+      callId,
+    };
+  }
+
+  return {
+    outputItem: {
+      id: `fc_${genId()}`,
+      type: 'function_call',
+      status: 'completed',
+      name: toolCall.name,
+      call_id: callId,
+      arguments: toolCall.arguments,
+    },
+    callId,
+  };
+};
+
+const buildResponseFromRawText = ({
+  body,
+  responseId,
+  created,
+  model,
+  rawText,
+}: {
+  body: any;
+  responseId: string;
+  created: number;
+  model: string;
+  rawText: string;
+}) => {
+  const { visibleText, reasoningText } = extractThinkingSections(rawText);
+  const outputItems: any[] = [];
+  const reasoningItem = shouldIncludeReasoningSummary(body)
+    ? buildReasoningItem(reasoningText, shouldIncludeEncryptedReasoning(body))
+    : null;
+
+  const toolCalls = detectToolCalls(visibleText, body.tools ?? []);
+
+  if (toolCalls && toolCalls.length > 0) {
+    const firstToolIndex = findFirstToolCallIndex(visibleText, body.tools ?? []);
+    const messageText =
+      firstToolIndex >= 0
+        ? visibleText.slice(0, firstToolIndex).trimEnd()
+        : '';
+
+    if (messageText) {
+      outputItems.push(buildMessageItem(messageText));
+    }
+
+    for (const toolCall of toolCalls) {
+      outputItems.push(buildToolResponseItem(toolCall).outputItem);
+    }
+  } else if (visibleText) {
+    outputItems.push(buildMessageItem(visibleText));
+  }
+
+  if (reasoningItem) {
+    outputItems.push(reasoningItem);
+  }
+
+  return {
+    id: responseId,
+    object: 'response',
+    created_at: created,
+    status: 'completed',
+    model,
+    output: outputItems,
+  };
+};
+
+const buildMessagesAndPayload = async ({
+  body,
+  fullInput,
+  instructions,
+  resolvedModel,
+}: {
+  body: any;
+  fullInput: any[];
+  instructions: string | null;
+  resolvedModel: any;
+}) => {
+  const openAiMessages = normalizeResponsesInputToOpenAiMessages(
+    fullInput,
+    instructions
+  );
+
+  if (Array.isArray(body.tools) && body.tools.length > 0) {
+    const toolPrompt = buildToolSystemPrompt(body.tools, {
+      parallelToolCalls: body.parallel_tool_calls,
+      toolChoice: body.tool_choice,
+    });
+    if (toolPrompt) {
+      const sysIdx = openAiMessages.findIndex((message) => message.role === 'system');
+      if (sysIdx >= 0) {
+        openAiMessages[sysIdx] = {
+          ...openAiMessages[sysIdx],
+          content: `${toolPrompt}\n\n${String(openAiMessages[sysIdx].content ?? '')}`,
+        };
+      } else {
+        openAiMessages.unshift({ role: 'system', content: toolPrompt });
+      }
+    }
+  }
+
+  const messages = await normalizeMessagesToBlackboxShape(
+    openAiMessages,
+    resolvedModel.name
+  );
+
+  if (messages.length === 0) {
+    const error: any = new Error('input must be a string or an array of messages');
+    error.status = 400;
+    error.code = 'invalid_input';
+    throw error;
+  }
+
+  return buildBlackboxPayload({
+    chatId: genShortId(),
+    agentMode: { ...resolvedModel },
+    messages,
+    maxTokens:
+      typeof body.max_output_tokens === 'number'
+        ? body.max_output_tokens
+        : MAX_TOKENS_DEFAULT,
+    reasoningMode:
+      Boolean(getReasoningEffort(body)) || shouldIncludeReasoningSummary(body),
+  });
+};
+
+const completeStoredResponse = (
+  responseId: string,
+  responseBody: any,
+  completedAt: number
+) => {
+  responsesStore.completeRecord(responseId, responseBody.output ?? [], completedAt);
+};
+
+const runBackgroundResponse = async ({
+  body,
+  responseId,
+  created,
+  resolvedModel,
+  reqId,
+  fullInput,
+  instructions,
+}: {
+  body: any;
+  responseId: string;
+  created: number;
+  resolvedModel: any;
+  reqId: string;
+  fullInput: any[];
+  instructions: string | null;
+}) => {
+  const abortController = new AbortController();
+  responsesStore.attachAbortController(responseId, abortController);
+
+  try {
+    const payload = await buildMessagesAndPayload({
+      body,
+      fullInput,
+      instructions,
+      resolvedModel,
+    });
+
+    const data = await callBlackboxAPIJson(
+      payload,
+      { reqId, signal: abortController.signal },
+      {
+        safeJson,
+        redactHeaders,
+        DEBUG_MAX_CHARS,
+      }
+    );
+
+    const rawText = extractRawAIResponse(data);
+    const responseBody = buildResponseFromRawText({
+      body,
+      responseId,
+      created,
+      model: resolvedModel.name,
+      rawText,
+    });
+
+    completeStoredResponse(responseId, responseBody, nowUnix());
+  } catch (error: any) {
+    if (isAbortError(error)) {
+      responsesStore.failRecord(responseId, {
+        message: 'Response was cancelled',
+        type: 'cancelled',
+        code: 'response_cancelled',
+      }, 'cancelled');
+      return;
+    }
+
+    logger.error(`[${reqId}] [/v1/responses background] Error:`, error);
+    responsesStore.failRecord(responseId, {
+      message: error?.message ?? 'Unknown error',
+      type: 'internal_server_error',
+      code: error?.status ? `upstream_${error.status}` : null,
+      details: error?.details ?? null,
+    });
+  }
+};
+
+export const retrieveResponse = async (req: Request, res: Response) => {
+  const record = responsesStore.getRecord(String(req.params.responseId ?? ''));
+  if (!record) {
+    return sendOpenAIError(res, 404, 'Response not found', 'response_not_found');
+  }
+
+  return res.json({
+    id: record.id,
+    object: record.object,
+    created_at: record.created_at,
+    completed_at: record.completed_at,
+    status: record.status,
+    model: record.model,
+    output: record.output,
+    error: record.error,
+    previous_response_id: record.previous_response_id,
+  });
+};
+
+export const cancelResponse = async (req: Request, res: Response) => {
+  const record = responsesStore.cancel(String(req.params.responseId ?? ''));
+  if (!record) {
+    return sendOpenAIError(res, 404, 'Response not found', 'response_not_found');
+  }
+
+  return res.json({
+    id: record.id,
+    object: record.object,
+    created_at: record.created_at,
+    completed_at: record.completed_at,
+    status: record.status,
+    model: record.model,
+    output: record.output,
+    error: record.error,
+    previous_response_id: record.previous_response_id,
+  });
+};
+
+export const compact = async (req: Request, res: Response) => {
+  const body = req.body ?? {};
+  const reqId = (req as any).reqId ?? genId();
+
+  const resolved = resolveModel(MODEL_CONFIG, body.model);
+  if (!resolved) {
+    return sendOpenAIError(
+      res,
+      400,
+      `Model not allowed: ${String(body.model ?? '')}`,
+      'model_not_allowed'
+    );
+  }
+
+  try {
+    const fullInput = coerceResponsesInputToArray(body.input);
+    const summarizerInstructions =
+      'Summarize the conversation context for a future coding turn. Preserve the user goal, constraints, file paths, unresolved issues, important tool results, and next steps. Keep it concise and factual.';
+
+    const payload = await buildMessagesAndPayload({
+      body: { ...body, tools: [] },
+      fullInput,
+      instructions: summarizerInstructions,
+      resolvedModel: resolved,
+    });
+
+    const data = await callBlackboxAPIJson(
+      payload,
+      { reqId },
+      {
+        safeJson,
+        redactHeaders,
+        DEBUG_MAX_CHARS,
+      }
+    );
+
+    const rawText = extractRawAIResponse(data);
+    const summaryText = extractThinkingSections(rawText).visibleText || rawText.trim();
+    const retainedItems = fullInput.filter((item) => {
+      if (item?.type !== 'message') return false;
+      return item.role === 'user' || item.role === 'developer';
+    });
+
+    return res.json({
+      output: [
+        ...retainedItems,
+        {
+          type: 'compaction',
+          encrypted_content: summaryText,
+        },
+      ],
+    });
+  } catch (error: any) {
+    logger.error(`[${reqId}] [/v1/responses/compact] Error:`, error);
+    return res.status(500).json({
+      error: {
+        message: error?.message ?? 'Unknown error',
+        type: 'internal_server_error',
+        code: error?.status ? `upstream_${error.status}` : null,
+        details: error?.details ?? null,
+      },
+    });
+  }
+};
 
 export const responses = async (req: Request, res: Response) => {
   const body = req.body ?? {};
@@ -46,63 +490,61 @@ export const responses = async (req: Request, res: Response) => {
     );
   }
 
-  const openAiMessages = normalizeResponsesBodyToOpenAiMessages(body);
-
-  // ツール定義がある場合、システムプロンプトにツール使用方法を注入する
-  if (Array.isArray(body.tools) && body.tools.length > 0) {
-    const toolPrompt = buildToolSystemPrompt(body.tools);
-    if (toolPrompt) {
-      const sysIdx = openAiMessages.findIndex((m) => m.role === 'system');
-      if (sysIdx >= 0) {
-        openAiMessages[sysIdx] = {
-          ...openAiMessages[sysIdx],
-          content: toolPrompt + '\n\n' + openAiMessages[sysIdx].content,
-        };
-      } else {
-        openAiMessages.unshift({ role: 'system', content: toolPrompt });
-      }
-    }
-  }
-
-  const chatId = genShortId();
-  const messages = await normalizeMessagesToBlackboxShape(
-    openAiMessages,
-    resolved.name
-  );
-
-  if (messages.length === 0) {
+  let requestState;
+  try {
+    requestState = responsesStore.resolveRequestState(body);
+  } catch (error: any) {
     return sendOpenAIError(
       res,
-      400,
-      'input must be a string or an array of messages',
-      'invalid_input'
+      error?.status ?? 404,
+      error?.message ?? 'previous_response_id not found',
+      error?.code ?? 'previous_response_not_found'
     );
   }
 
-  const payload = buildBlackboxPayload({
-    chatId,
-    agentMode: { ...resolved },
-    messages,
-    maxTokens: MAX_TOKENS_DEFAULT,
+  const responseId = `resp_${genId()}`;
+  const created = nowUnix();
+  responsesStore.createPendingRecord({
+    id: responseId,
+    model: resolved.name,
+    createdAt: created,
+    instructions: requestState.instructions,
+    previousResponseId: requestState.previous?.id ?? null,
+    fullInput: requestState.fullInput,
+    store: body.store !== false || body.background === true,
   });
 
-  logger.debug(
-    `[${reqId}] [RESPONSES] resolvedModel=${resolved.name} messages=${messages.length} chatId=${chatId} stream=${Boolean(
-      body.stream
-    )}`
-  );
+  if (body.background === true && body.stream !== true) {
+    void runBackgroundResponse({
+      body,
+      responseId,
+      created,
+      resolvedModel: resolved,
+      reqId,
+      fullInput: requestState.fullInput,
+      instructions: requestState.instructions,
+    });
+
+    return res.json({
+      id: responseId,
+      object: 'response',
+      created_at: created,
+      completed_at: null,
+      status: 'in_progress',
+      model: resolved.name,
+      output: [],
+      error: null,
+      previous_response_id: requestState.previous?.id ?? null,
+    });
+  }
 
   if (body.stream === true) {
     setSseHeaders(res);
 
     const abortController = new AbortController();
+    responsesStore.attachAbortController(responseId, abortController);
     res.on('close', () => abortController.abort());
 
-    const responseId = `resp_${genId()}`;
-    const created = nowUnix();
-    const outputIndex = 0;
-
-    // response.created を送信（status: in_progress）
     writeSseEvent(res, 'response.created', {
       type: 'response.created',
       sequence_number: 0,
@@ -114,22 +556,29 @@ export const responses = async (req: Request, res: Response) => {
         completed_at: null,
         error: null,
         incomplete_details: null,
-        instructions:
-          typeof body.instructions === 'string' ? body.instructions : null,
-        max_output_tokens: null,
+        instructions: requestState.instructions,
+        max_output_tokens:
+          typeof body.max_output_tokens === 'number' ? body.max_output_tokens : null,
         model: resolved.name,
         output: [],
-        previous_response_id: null,
-        reasoning_effort: null,
-        store: false,
-        temperature: 1,
-        text: { format: { type: 'text' } },
+        previous_response_id: requestState.previous?.id ?? null,
+        reasoning_effort: getReasoningEffort(body),
+        store: body.store !== false || body.background === true,
+        temperature: typeof body.temperature === 'number' ? body.temperature : 1,
+        text: body.text ?? { format: { type: 'text' } },
         tool_choice: body.tool_choice ?? 'auto',
         tools: Array.isArray(body.tools) ? body.tools : [],
       },
     });
 
     try {
+      const payload = await buildMessagesAndPayload({
+        body,
+        fullInput: requestState.fullInput,
+        instructions: requestState.instructions,
+        resolvedModel: resolved,
+      });
+
       const upstream = await callBlackboxAPIStream(
         payload,
         { reqId, signal: abortController.signal },
@@ -141,283 +590,206 @@ export const responses = async (req: Request, res: Response) => {
       );
 
       let fullText = '';
-      let streamedTextLength = 0;
-      let inThinkBlock = false;
+      let emittedText = '';
       let hasStartedMessage = false;
-      const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
-      const itemId = `msg_${genId()}`;
-      const contentIndex = 0;
+      const outputItems: any[] = [];
       let seq = 1;
+      const messageItemId = `msg_${genId()}`;
 
       const startMessageIfNeeded = () => {
-        if (!hasStartedMessage) {
-          hasStartedMessage = true;
-          writeSseEvent(res, 'response.output_item.added', {
-            type: 'response.output_item.added',
-            output_index: outputIndex,
-            item: {
-              id: itemId,
-              type: 'message',
-              status: 'in_progress',
-              role: 'assistant',
-              content: [],
-            },
-            sequence_number: seq++,
-          });
-          writeSseEvent(res, 'response.content_part.added', {
-            type: 'response.content_part.added',
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: contentIndex,
-            part: { type: 'output_text', text: '', annotations: [] },
-            sequence_number: seq++,
-          });
-        }
+        if (hasStartedMessage) return;
+        hasStartedMessage = true;
+        writeSseEvent(res, 'response.output_item.added', {
+          type: 'response.output_item.added',
+          output_index: outputItems.length,
+          item: {
+            id: messageItemId,
+            type: 'message',
+            status: 'in_progress',
+            role: 'assistant',
+            content: [],
+          },
+          sequence_number: seq++,
+        });
+        writeSseEvent(res, 'response.content_part.added', {
+          type: 'response.content_part.added',
+          item_id: messageItemId,
+          output_index: outputItems.length,
+          content_index: 0,
+          part: { type: 'output_text', text: '', annotations: [] },
+          sequence_number: seq++,
+        });
       };
 
       if (upstream.body) {
-        for await (const delta of readUpstreamDeltas(
-          upstream.body.getReader()
-        )) {
-          const chunk = delta as string;
-          fullText += chunk;
+        for await (const delta of readUpstreamDeltas(upstream.body.getReader())) {
+          fullText += delta;
+          const visibleText = extractThinkingSections(fullText).visibleText;
+          const remainingText = visibleText.slice(emittedText.length);
+          const firstToolIndex = findFirstToolCallIndex(remainingText, body.tools ?? []);
 
-          if (fullText.includes('<think>') && !fullText.includes('</think>')) {
-            inThinkBlock = true;
-            continue;
-          } else if (fullText.includes('</think>')) {
-            inThinkBlock = false;
-          }
-
-          if (inThinkBlock) continue;
-
-          const processedText = fullText.replace(
-            /<think>[\s\S]*?<\/think>/gi,
-            ''
-          );
-
-          let isToolCallCandidate = false;
-          if (hasTools) {
-            const remainingText = processedText.slice(streamedTextLength);
-            const idx1 = remainingText.indexOf('{');
-            const idx2 = remainingText.indexOf('[Tool call:');
-            const idx3 = remainingText.indexOf('```');
-
-            const indices = [idx1, idx2, idx3].filter((i) => i !== -1);
-
-            if (indices.length > 0) {
-              isToolCallCandidate = true;
-              const firstIndicatorIdx = Math.min(...indices);
-
-              if (firstIndicatorIdx > 0) {
-                const safeText = remainingText.slice(0, firstIndicatorIdx);
-                startMessageIfNeeded();
-                writeSseEvent(res, 'response.output_text.delta', {
-                  type: 'response.output_text.delta',
-                  item_id: itemId,
-                  output_index: outputIndex,
-                  content_index: contentIndex,
-                  delta: safeText,
-                  sequence_number: seq++,
-                });
-                streamedTextLength += safeText.length;
-              }
-            }
-          }
-
-          if (!isToolCallCandidate) {
-            const newText = processedText.slice(streamedTextLength);
-            if (newText.length > 0) {
+          if (firstToolIndex >= 0) {
+            const safeText = remainingText.slice(0, firstToolIndex);
+            if (safeText) {
               startMessageIfNeeded();
               writeSseEvent(res, 'response.output_text.delta', {
                 type: 'response.output_text.delta',
-                item_id: itemId,
-                output_index: outputIndex,
-                content_index: contentIndex,
-                delta: newText,
+                item_id: messageItemId,
+                output_index: outputItems.length,
+                content_index: 0,
+                delta: safeText,
                 sequence_number: seq++,
               });
-              streamedTextLength = processedText.length;
+              emittedText += safeText;
             }
+            continue;
+          }
+
+          if (remainingText) {
+            startMessageIfNeeded();
+            writeSseEvent(res, 'response.output_text.delta', {
+              type: 'response.output_text.delta',
+              item_id: messageItemId,
+              output_index: outputItems.length,
+              content_index: 0,
+              delta: remainingText,
+              sequence_number: seq++,
+            });
+            emittedText += remainingText;
           }
         }
       }
 
-      const processedText = fullText.replace(/<think>[\s\S]*?<\/think>/gi, '');
-      const toolCalls = detectToolCalls(processedText, body.tools ?? []);
+      const { visibleText, reasoningText } = extractThinkingSections(fullText);
+      const reasoningItem = shouldIncludeReasoningSummary(body)
+        ? buildReasoningItem(reasoningText, shouldIncludeEncryptedReasoning(body))
+        : null;
 
-      if (toolCalls && toolCalls.length > 0) {
-        // ===== function_call イベントシーケンス（OpenAI Responses API 仕様準拠）=====
-        const outputItems = [];
-        let currentOutputIndex = outputIndex;
-
-        for (const toolCall of toolCalls) {
-          const fcId = `fc_${genId()}`;
-          const callId = `call_${genId()}`;
-          const argsStr = toolCall.arguments;
-
-          // 1. response.output_item.added (function_call, in_progress)
-          writeSseEvent(res, 'response.output_item.added', {
-            type: 'response.output_item.added',
-            output_index: currentOutputIndex,
-            item: {
-              id: fcId,
-              type: 'function_call',
-              status: 'in_progress',
-              name: toolCall.name,
-              call_id: callId,
-              arguments: '',
-            },
-            sequence_number: seq++,
-          });
-
-          // 2. response.function_call_arguments.delta
-          writeSseEvent(res, 'response.function_call_arguments.delta', {
-            type: 'response.function_call_arguments.delta',
-            item_id: fcId,
-            output_index: currentOutputIndex,
-            delta: argsStr,
-            sequence_number: seq++,
-          });
-
-          // 3. response.function_call_arguments.done
-          writeSseEvent(res, 'response.function_call_arguments.done', {
-            type: 'response.function_call_arguments.done',
-            item_id: fcId,
-            name: toolCall.name,
-            output_index: currentOutputIndex,
-            arguments: argsStr,
-            sequence_number: seq++,
-          });
-
-          // 4. response.output_item.done (function_call, completed)
-          writeSseEvent(res, 'response.output_item.done', {
-            type: 'response.output_item.done',
-            output_index: currentOutputIndex,
-            item: {
-              id: fcId,
-              type: 'function_call',
-              status: 'completed',
-              name: toolCall.name,
-              call_id: callId,
-              arguments: argsStr,
-            },
-            sequence_number: seq++,
-          });
-
-          outputItems.push({
-            id: fcId,
-            type: 'function_call',
-            status: 'completed',
-            name: toolCall.name,
-            call_id: callId,
-            arguments: argsStr,
-          });
-
-          currentOutputIndex++;
-        }
-
-        // 5. response.completed
-        writeSseEvent(res, 'response.completed', {
-          type: 'response.completed',
+      const toolCalls = detectToolCalls(visibleText, body.tools ?? []);
+      if (hasStartedMessage && emittedText.trim()) {
+        const messageItem = buildMessageItem(emittedText);
+        messageItem.id = messageItemId;
+        writeSseEvent(res, 'response.output_text.done', {
+          type: 'response.output_text.done',
+          item_id: messageItemId,
+          output_index: outputItems.length,
+          content_index: 0,
+          text: emittedText,
           sequence_number: seq++,
-          response: {
-            id: responseId,
-            object: 'response',
-            created_at: created,
-            status: 'completed',
-            model: resolved.name,
-            output: outputItems,
-          },
         });
-      } else {
-        const remainingText = processedText.slice(streamedTextLength);
-        if (remainingText.length > 0) {
-          startMessageIfNeeded();
-          writeSseEvent(res, 'response.output_text.delta', {
-            type: 'response.output_text.delta',
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: contentIndex,
-            delta: remainingText,
-            sequence_number: seq++,
-          });
-        }
-
-        if (hasStartedMessage) {
-          writeSseEvent(res, 'response.output_text.done', {
-            type: 'response.output_text.done',
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: contentIndex,
-            text: processedText,
-            sequence_number: seq++,
-          });
-
-          writeSseEvent(res, 'response.content_part.done', {
-            type: 'response.content_part.done',
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: contentIndex,
-            part: { type: 'output_text', text: processedText, annotations: [] },
-            sequence_number: seq++,
-          });
-
-          writeSseEvent(res, 'response.output_item.done', {
-            type: 'response.output_item.done',
-            output_index: outputIndex,
-            item: {
-              id: itemId,
-              type: 'message',
-              status: 'completed',
-              role: 'assistant',
-              content: [
-                { type: 'output_text', text: processedText, annotations: [] },
-              ],
-            },
-            sequence_number: seq++,
-          });
-        }
-
-        writeSseEvent(res, 'response.completed', {
-          type: 'response.completed',
+        writeSseEvent(res, 'response.content_part.done', {
+          type: 'response.content_part.done',
+          item_id: messageItemId,
+          output_index: outputItems.length,
+          content_index: 0,
+          part: { type: 'output_text', text: emittedText, annotations: [] },
           sequence_number: seq++,
-          response: {
-            id: responseId,
-            object: 'response',
-            created_at: created,
-            status: 'completed',
-            model: resolved.name,
-            output: hasStartedMessage
-              ? [
-                  {
-                    id: itemId,
-                    type: 'message',
-                    status: 'completed',
-                    role: 'assistant',
-                    content: [
-                      {
-                        type: 'output_text',
-                        text: processedText,
-                        annotations: [],
-                      },
-                    ],
-                  },
-                ]
-              : [],
-          },
         });
+        writeSseEvent(res, 'response.output_item.done', {
+          type: 'response.output_item.done',
+          output_index: outputItems.length,
+          item: messageItem,
+          sequence_number: seq++,
+        });
+        outputItems.push(messageItem);
       }
 
+      if (toolCalls && toolCalls.length > 0) {
+        for (const toolCall of toolCalls) {
+          const { outputItem } = buildToolResponseItem(toolCall);
+
+          if (outputItem.type === 'function_call') {
+            writeSseEvent(res, 'response.output_item.added', {
+              type: 'response.output_item.added',
+              output_index: outputItems.length,
+              item: {
+                ...outputItem,
+                status: 'in_progress',
+                arguments: '',
+              },
+              sequence_number: seq++,
+            });
+            writeSseEvent(res, 'response.function_call_arguments.delta', {
+              type: 'response.function_call_arguments.delta',
+              item_id: outputItem.id,
+              output_index: outputItems.length,
+              delta: outputItem.arguments,
+              sequence_number: seq++,
+            });
+            writeSseEvent(res, 'response.function_call_arguments.done', {
+              type: 'response.function_call_arguments.done',
+              item_id: outputItem.id,
+              name: outputItem.name,
+              output_index: outputItems.length,
+              arguments: outputItem.arguments,
+              sequence_number: seq++,
+            });
+          }
+
+          writeSseEvent(res, 'response.output_item.done', {
+            type: 'response.output_item.done',
+            output_index: outputItems.length,
+            item: outputItem,
+            sequence_number: seq++,
+          });
+          outputItems.push(outputItem);
+        }
+      } else if (!emittedText.trim() && visibleText) {
+        const messageItem = buildMessageItem(visibleText);
+        writeSseEvent(res, 'response.output_item.done', {
+          type: 'response.output_item.done',
+          output_index: outputItems.length,
+          item: messageItem,
+          sequence_number: seq++,
+        });
+        outputItems.push(messageItem);
+      }
+
+      if (reasoningItem) {
+        writeSseEvent(res, 'response.output_item.done', {
+          type: 'response.output_item.done',
+          output_index: outputItems.length,
+          item: reasoningItem,
+          sequence_number: seq++,
+        });
+        outputItems.push(reasoningItem);
+      }
+
+      const responseBody = {
+        id: responseId,
+        object: 'response',
+        created_at: created,
+        status: 'completed',
+        model: resolved.name,
+        output: outputItems,
+      };
+
+      writeSseEvent(res, 'response.completed', {
+        type: 'response.completed',
+        sequence_number: seq++,
+        response: responseBody,
+      });
+
+      completeStoredResponse(responseId, responseBody, nowUnix());
       res.write('data: [DONE]\n\n');
       return res.end();
     } catch (error: any) {
       if (isAbortError(error)) {
-        logger.debug(`[${reqId}] [/v1/responses stream] aborted by client`);
+        responsesStore.failRecord(responseId, {
+          message: 'Response was cancelled',
+          type: 'cancelled',
+          code: 'response_cancelled',
+        }, 'cancelled');
         return;
       }
 
       logger.error(`[${reqId}] [/v1/responses stream] Error:`, error);
+      responsesStore.failRecord(responseId, {
+        message: error?.message ?? 'Unknown error',
+        type: 'internal_server_error',
+        code: error?.status ? `upstream_${error.status}` : null,
+        details: error?.details ?? null,
+      });
 
       if (!res.writableEnded) {
         writeSseEvent(res, 'response.failed', {
@@ -443,6 +815,12 @@ export const responses = async (req: Request, res: Response) => {
   }
 
   try {
+    const payload = await buildMessagesAndPayload({
+      body,
+      fullInput: requestState.fullInput,
+      instructions: requestState.instructions,
+      resolvedModel: resolved,
+    });
     const data = await callBlackboxAPIJson(
       payload,
       { reqId },
@@ -452,57 +830,26 @@ export const responses = async (req: Request, res: Response) => {
         DEBUG_MAX_CHARS,
       }
     );
-    const aiText = extractAIResponse(data, DEBUG_MAX_CHARS);
 
-    // ツールコール検出（非ストリーミング）
-    const processedText = aiText
-      .replace(/<think>[\s\S]*?<\/think>/gi, '')
-      .trim();
-    const toolCalls = detectToolCalls(processedText, body.tools ?? []);
-    if (toolCalls && toolCalls.length > 0) {
-      // ===== function_call レスポンス（OpenAI Responses API 仕様準拠）=====
-      const outputItems = toolCalls.map((toolCall) => {
-        const fcId = `fc_${genId()}`;
-        const callId = `call_${genId()}`;
-        return {
-          type: 'function_call',
-          id: fcId,
-          call_id: callId,
-          name: toolCall.name,
-          arguments: toolCall.arguments,
-          status: 'completed',
-        };
-      });
-
-      return res.json({
-        id: `resp_${genId()}`,
-        object: 'response',
-        created_at: nowUnix(),
-        status: 'completed',
-        model: resolved.name,
-        output: outputItems,
-      });
-    }
-
-    // 通常テキストレスポンス
-    return res.json({
-      id: `resp_${genId()}`,
-      object: 'response',
-      created_at: nowUnix(),
-      status: 'completed',
+    const rawText = extractRawAIResponse(data);
+    const responseBody = buildResponseFromRawText({
+      body,
+      responseId,
+      created,
       model: resolved.name,
-      output: [
-        {
-          id: `msg_${genId()}`,
-          type: 'message',
-          status: 'completed',
-          role: 'assistant',
-          content: [{ type: 'output_text', text: aiText, annotations: [] }],
-        },
-      ],
+      rawText,
     });
+
+    completeStoredResponse(responseId, responseBody, nowUnix());
+    return res.json(responseBody);
   } catch (error: any) {
     logger.error(`[${reqId}] [/v1/responses] Error:`, error);
+    responsesStore.failRecord(responseId, {
+      message: error?.message ?? 'Unknown error',
+      type: 'internal_server_error',
+      code: error?.status ? `upstream_${error.status}` : null,
+      details: error?.details ?? null,
+    });
     return res.status(500).json({
       error: {
         message: error?.message ?? 'Unknown error',

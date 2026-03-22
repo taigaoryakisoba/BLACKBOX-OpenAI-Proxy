@@ -55,15 +55,8 @@ export const extractAIResponse = (
   data: any,
   DEBUG_MAX_CHARS: number
 ): string => {
-  let raw = '';
-  if (!data) return 'No response data received';
-  if (typeof data === 'string') raw = data;
-  else if (data.response) raw = String(data.response);
-  else if (data.generations?.[0]?.text) raw = String(data.generations[0].text);
-  else if (data.choices?.[0]?.message?.content)
-    return String(data.choices[0].message.content);
-  else if (data.text) raw = String(data.text);
-  else return 'Response received but in an unexpected format';
+  let raw = extractRawAIResponse(data);
+  if (!raw) return 'Response received but in an unexpected format';
 
   logger.debug(
     `[extractAIResponse] raw before processing: ${safeJson(raw, DEBUG_MAX_CHARS)}`
@@ -98,6 +91,17 @@ export const extractAIResponse = (
   return raw;
 };
 
+export const extractRawAIResponse = (data: any): string => {
+  if (!data) return '';
+  if (typeof data === 'string') return data;
+  if (data.response) return String(data.response);
+  if (data.generations?.[0]?.text) return String(data.generations[0].text);
+  if (data.choices?.[0]?.message?.content)
+    return String(data.choices[0].message.content);
+  if (data.text) return String(data.text);
+  return '';
+};
+
 export const tryConsumeUpstreamSseEvents = (
   buffer: string
 ): { events: string[]; rest: string } => {
@@ -127,6 +131,12 @@ export const tryConsumeUpstreamSseEvents = (
 /**
  * Upstream レスポンスのボディを読み取り、テキストデルタを順に yield する async generator。
  * SSE形式（data: ...）と生テキストの両方に対応。
+ *
+ * - SSEモード: `data: ...\n\n` 形式のイベントをパースしてyield。
+ *   バッファは未消費の部分イベントを保持し、ループ終了後にフラッシュする。
+ * - プレーンテキストモード: 各チャンクをそのままyieldし、バッファをクリアする。
+ *   これにより、ループ終了後のバッファフラッシュで同じ内容が2重にyieldされるバグを防ぐ。
+ *
  * @param {ReadableStreamDefaultReader} reader
  * @yields {string} テキストデルタ
  */
@@ -147,14 +157,24 @@ export async function* readUpstreamDeltas(
     const { events, rest } = tryConsumeUpstreamSseEvents(buffer);
     buffer = rest;
 
-    const deltas = events.length > 0 ? events : [chunk];
-    for (const d of deltas) {
-      if (!d || d.trim() === '[DONE]') continue;
-      yield d;
+    if (events.length > 0) {
+      // SSEモード: パースされたイベントデータをyield
+      for (const d of events) {
+        if (!d || d.trim() === '[DONE]') continue;
+        yield d;
+      }
+    } else {
+      // プレーンテキストモード: 生チャンクをyieldし、バッファをクリア
+      // バッファをクリアしないと、ループ終了後の flush で全チャンクが再度yieldされ
+      // レスポンスが2重になるバグが発生する
+      buffer = '';
+      if (chunk && chunk.trim() !== '[DONE]') {
+        yield chunk;
+      }
     }
   }
 
-  // ループ終了後に残ったバッファを flush
+  // ループ終了後に残ったバッファを flush（SSEモードで末尾の \n\n がない部分イベント対応）
   if (buffer && buffer.trim() !== '[DONE]') {
     yield buffer;
   }

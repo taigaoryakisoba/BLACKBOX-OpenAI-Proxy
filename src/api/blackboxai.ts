@@ -1,11 +1,9 @@
 import {
   API_ENDPOINT,
   BASE_HEADERS,
-  MAX_TOKENS_DEFAULT,
   DEFAULT_USER_SELECTED_AGENT,
   DEFAULT_GITHUB_TOKEN,
   DEFAULT_WORKSPACE_ID,
-  DEFAULT_IS_PREMIUM,
   SUBSCRIPTION_CUSTOMER_ID,
   VALIDATION_TOKEN,
 } from '../configs/env';
@@ -16,11 +14,13 @@ export const buildBlackboxPayload = ({
   agentMode,
   messages,
   maxTokens,
+  reasoningMode = false,
 }: {
   chatId: string;
   agentMode: any;
   messages: any[];
   maxTokens: number;
+  reasoningMode?: boolean;
 }) => {
   if (agentMode.name === 'blackbox/free') agentMode = undefined;
 
@@ -74,14 +74,14 @@ export const buildBlackboxPayload = ({
       offlineMode: false,
     },
 
-    isPremium: DEFAULT_IS_PREMIUM,
+    isPremium: !!SUBSCRIPTION_CUSTOMER_ID,
 
     subscriptionCache: SUBSCRIPTION_CUSTOMER_ID
       ? { customerId: SUBSCRIPTION_CUSTOMER_ID }
       : undefined,
 
     beastMode: false,
-    reasoningMode: false,
+    reasoningMode,
     designerMode: false,
     workspaceId: DEFAULT_WORKSPACE_ID,
     asyncMode: false,
@@ -97,6 +97,7 @@ export const callBlackboxAPIJson = async (
   { safeJson, redactHeaders, DEBUG_MAX_CHARS }: any
 ) => {
   const reqId = ctx.reqId ?? 'n/a';
+  const signal = ctx.signal;
 
   logger.debug(`[${reqId}] [UPSTREAM REQUEST] POST ${API_ENDPOINT}`);
   logger.debug(
@@ -110,6 +111,7 @@ export const callBlackboxAPIJson = async (
     method: 'POST',
     headers: BASE_HEADERS,
     body: JSON.stringify(payload),
+    signal,
   });
 
   const status = response.status;

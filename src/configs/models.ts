@@ -5,6 +5,10 @@ export interface ModelConfig {
 }
 
 export const MODEL_CONFIG: Record<string, ModelConfig> = {
+  free: {
+    name: 'blackbox/free',
+    mode: true,
+  },
   'blackbox/free': {
     name: 'blackbox/free',
     mode: true,
