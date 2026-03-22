@@ -1,5 +1,9 @@
 import { ToolCall, OpenAIMessage, BlackboxMessage } from '../types';
-import { ChatCompletionChunk, ErrorResponse } from '../models';
+import {
+  ChatCompletionChunk,
+  CompletionChunk,
+  ErrorResponse,
+} from '../models';
 import { genShortId } from '../utils/utils';
 import logger from './logger';
 
@@ -1249,6 +1253,33 @@ export const makeChatCompletionChunk = ({
     ],
   };
 };
+
+export const makeCompletionChunk = ({
+  id,
+  model,
+  created,
+  contentDelta,
+  finishReason = null,
+}: {
+  id: string;
+  model: string;
+  created: number;
+  contentDelta: string;
+  finishReason?: string | null;
+}): CompletionChunk => ({
+  id,
+  object: 'text_completion',
+  created,
+  model,
+  choices: [
+    {
+      text: contentDelta,
+      index: 0,
+      logprobs: null,
+      finish_reason: finishReason,
+    },
+  ],
+});
 
 export const sendOpenAIError = (
   res: any,
