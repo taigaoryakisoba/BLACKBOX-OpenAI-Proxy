@@ -32,11 +32,7 @@ import {
   findFirstToolCallIndex,
 } from '../../../services/openai';
 import responsesStore from '../../../services/responses-store';
-import {
-  buildBlackboxPayload,
-  callBlackboxAPIJson,
-  callBlackboxAPIStream,
-} from '../../../api/blackboxai';
+import blackboxChatService from '../../../services/blackbox-chat';
 import logger from '../../../services/logger';
 
 const getReasoningEffort = (body: any): string | null => {
@@ -291,7 +287,7 @@ const buildMessagesAndPayload = async ({
     throw error;
   }
 
-  return buildBlackboxPayload({
+  return blackboxChatService.buildPayload({
     chatId: genShortId(),
     agentMode: { ...resolvedModel },
     messages,
@@ -340,7 +336,7 @@ const runBackgroundResponse = async ({
       resolvedModel,
     });
 
-    const data = await callBlackboxAPIJson(
+    const data = await blackboxChatService.callJson(
       payload,
       { reqId, signal: abortController.signal },
       {
@@ -459,7 +455,7 @@ export const compact = async (req: Request, res: Response) => {
       resolvedModel: resolved,
     });
 
-    const data = await callBlackboxAPIJson(
+    const data = await blackboxChatService.callJson(
       payload,
       { reqId },
       {
@@ -609,7 +605,7 @@ export const responses = async (req: Request, res: Response) => {
         resolvedModel: resolved,
       });
 
-      const upstream = await callBlackboxAPIStream(
+      const upstream = await blackboxChatService.callStream(
         payload,
         { reqId, signal: abortController.signal },
         {
@@ -851,7 +847,7 @@ export const responses = async (req: Request, res: Response) => {
       instructions: requestState.instructions,
       resolvedModel: resolved,
     });
-    const data = await callBlackboxAPIJson(
+    const data = await blackboxChatService.callJson(
       payload,
       { reqId },
       {
@@ -893,3 +889,5 @@ export const responses = async (req: Request, res: Response) => {
     });
   }
 };
+
+

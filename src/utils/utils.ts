@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { getExternalResource } from '../api/external/resource';
 import logger from '../services/logger';
 
 export const isAbortError = (err: any): boolean => {
@@ -203,7 +204,7 @@ export const fetchImageAsBase64 = async (
   url: string
 ): Promise<string | null> => {
   try {
-    const response = await fetch(url);
+    const response = await getExternalResource({ url });
     if (!response.ok) {
       logger.error(
         `Failed to fetch image from ${url}: ${response.status} ${response.statusText}`

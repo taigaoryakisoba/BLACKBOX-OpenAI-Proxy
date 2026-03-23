@@ -27,11 +27,7 @@ import {
   buildToolSystemPrompt,
   detectToolCalls,
 } from '../../../services/openai';
-import {
-  buildBlackboxPayload,
-  callBlackboxAPIJson,
-  callBlackboxAPIStream,
-} from '../../../api/blackboxai';
+import blackboxChatService from '../../../services/blackbox-chat';
 import logger from '../../../services/logger';
 
 export const chatCompletions = async (req: Request, res: Response) => {
@@ -96,7 +92,7 @@ export const chatCompletions = async (req: Request, res: Response) => {
     );
   }
 
-  const payload = buildBlackboxPayload({
+  const payload = blackboxChatService.buildPayload({
     chatId,
     agentMode: { ...resolved },
     messages,
@@ -131,7 +127,7 @@ export const chatCompletions = async (req: Request, res: Response) => {
     );
 
     try {
-      const upstream = await callBlackboxAPIStream(
+      const upstream = await blackboxChatService.callStream(
         payload,
         { reqId, signal: abortController.signal },
         {
@@ -294,7 +290,7 @@ export const chatCompletions = async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await callBlackboxAPIJson(
+    const data = await blackboxChatService.callJson(
       payload,
       { reqId },
       {

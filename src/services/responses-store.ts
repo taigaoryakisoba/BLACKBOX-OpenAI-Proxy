@@ -18,8 +18,19 @@ export interface StoredResponseRecord {
 const cloneItems = (items: any[]): any[] => JSON.parse(JSON.stringify(items ?? []));
 
 class ResponsesStore {
+  private static instance: ResponsesStore | null = null;
   private readonly records = new Map<string, StoredResponseRecord>();
   private readonly abortControllers = new Map<string, AbortController>();
+
+  private constructor() {}
+
+  static getInstance(): ResponsesStore {
+    if (!ResponsesStore.instance) {
+      ResponsesStore.instance = new ResponsesStore();
+    }
+
+    return ResponsesStore.instance;
+  }
 
   resolveRequestState(body: any): {
     instructions: string | null;
@@ -129,6 +140,6 @@ class ResponsesStore {
   }
 }
 
-const responsesStore = new ResponsesStore();
+const responsesStore = ResponsesStore.getInstance();
 
 export default responsesStore;

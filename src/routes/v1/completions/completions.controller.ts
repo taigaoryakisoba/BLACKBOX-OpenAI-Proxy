@@ -23,11 +23,7 @@ import {
   sendOpenAIError,
   makeCompletionChunk,
 } from '../../../services/openai';
-import {
-  buildBlackboxPayload,
-  callBlackboxAPIJson,
-  callBlackboxAPIStream,
-} from '../../../api/blackboxai';
+import blackboxChatService from '../../../services/blackbox-chat';
 import logger from '../../../services/logger';
 
 const THINK_BLOCK_RE = /<think>[\s\S]*?<\/think>/gi;
@@ -289,7 +285,7 @@ export const completions = async (req: Request, res: Response) => {
     );
   }
 
-  const payload = buildBlackboxPayload({
+  const payload = blackboxChatService.buildPayload({
     chatId,
     agentMode: { ...resolved },
     messages,
@@ -325,7 +321,7 @@ export const completions = async (req: Request, res: Response) => {
         );
       }
 
-      const upstream = await callBlackboxAPIStream(
+      const upstream = await blackboxChatService.callStream(
         payload,
         { reqId, signal: abortController.signal },
         {
@@ -442,7 +438,7 @@ export const completions = async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await callBlackboxAPIJson(
+    const data = await blackboxChatService.callJson(
       payload,
       { reqId },
       {
@@ -493,3 +489,5 @@ export const completions = async (req: Request, res: Response) => {
     });
   }
 };
+
+

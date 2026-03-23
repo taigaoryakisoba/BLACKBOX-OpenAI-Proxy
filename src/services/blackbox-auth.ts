@@ -1,5 +1,11 @@
+import { getBlackboxNextScript } from '../api/blackbox/_next/script';
+import { getBlackboxAuthSession } from '../api/blackbox/api/auth/session';
+import { checkBlackboxSubscription } from '../api/blackbox/api/check-subscription';
 import {
-  BASE_HEADERS,
+  getBlackboxHomePage,
+  submitBlackboxLogin,
+} from '../api/blackbox/index';
+import {
   LOGIN_EAGER,
   LOGIN_EMAIL,
   LOGIN_PASSWORD,
@@ -9,10 +15,6 @@ import {
 } from '../configs/env';
 import logger from './logger';
 
-const APP_ORIGIN = 'https://app.blackbox.ai';
-const HOME_URL = `${APP_ORIGIN}/`;
-const AUTH_SESSION_URL = `${APP_ORIGIN}/api/auth/session`;
-const CHECK_SUBSCRIPTION_URL = `${APP_ORIGIN}/api/check-subscription`;
 const LOGIN_ACTION_FORM_STATE = '["$undefined","$K1"]';
 const LOGIN_DISCOVERY_MARKERS = [
   'function LoginForm',
@@ -73,38 +75,6 @@ class CookieJar {
       .join('; ');
   }
 }
-
-interface RuntimeAuthState {
-  cookieJar: CookieJar;
-  customerId: string;
-  sessionEmail: string;
-  pendingLogin: Promise<BlackboxAuthContext> | null;
-  lastFailureAt: number;
-}
-
-const runtimeState: RuntimeAuthState = {
-  cookieJar: new CookieJar(),
-  customerId: '',
-  sessionEmail: '',
-  pendingLogin: null,
-  lastFailureAt: 0,
-};
-
-let cachedEnvCustomerId: string | null | undefined;
-
-const hasRuntimeCredentials = (): boolean =>
-  LOGIN_EMAIL.trim().length > 0 && LOGIN_PASSWORD.trim().length > 0;
-
-const buildBaseHeaders = (
-  overrides: Record<string, string> = {}
-): Record<string, string> => ({
-  accept: BASE_HEADERS.accept,
-  'accept-language': BASE_HEADERS['accept-language'],
-  'cache-control': BASE_HEADERS['cache-control'],
-  pragma: BASE_HEADERS.pragma,
-  'user-agent': BASE_HEADERS['user-agent'],
-  ...overrides,
-});
 
 const splitCombinedSetCookieHeader = (headerValue: string): string[] => {
   const cookies: string[] = [];
@@ -185,7 +155,9 @@ export const extractLoginActionIdFromScript = (
   return actionByVar.at(-1)?.[2] ?? null;
 };
 
-export const extractServerActionError = (responseText: string): string | null => {
+export const extractServerActionError = (
+  responseText: string
+): string | null => {
   const codeMatch = responseText.match(
     /"type":"error","resultCode":"([^"]+)"/
   );
@@ -198,289 +170,300 @@ export const extractServerActionError = (responseText: string): string | null =>
 export const buildEnvSessionCookieHeader = (sessionToken: string): string =>
   `next-auth.session-token=${sessionToken}`;
 
-const fetchWithCookieJar = async (
-  url: string,
-  init: RequestInit,
-  cookieJar: CookieJar
-): Promise<Response> => {
-  const headers = new Headers(init.headers ?? {});
-  const cookieHeader = cookieJar.toHeader();
-  if (cookieHeader) headers.set('Cookie', cookieHeader);
+class BlackboxAuthService {
+  private static instance: BlackboxAuthService | null = null;
 
-  const response = await fetch(url, {
-    ...init,
-    headers,
-  });
-  cookieJar.setFromResponse(response);
-  return response;
-};
+  private runtimeCookieJar = new CookieJar();
+  private runtimeCustomerId = '';
+  private runtimeSessionEmail = '';
+  private pendingLogin: Promise<BlackboxAuthContext> | null = null;
+  private lastFailureAt = 0;
+  private cachedEnvCustomerId: string | null | undefined;
 
-const parseSessionPayload = async (
-  cookieHeader: string
-): Promise<SessionPayload | null> => {
-  if (!cookieHeader) return null;
+  private constructor() {}
 
-  const response = await fetch(AUTH_SESSION_URL, {
-    headers: buildBaseHeaders({
-      Cookie: cookieHeader,
-      origin: APP_ORIGIN,
-    }),
-  });
+  static getInstance(): BlackboxAuthService {
+    if (!BlackboxAuthService.instance) {
+      BlackboxAuthService.instance = new BlackboxAuthService();
+    }
 
-  if (!response.ok) return null;
-
-  const payload = await response.json().catch(() => null);
-  return payload && typeof payload === 'object' ? (payload as SessionPayload) : null;
-};
-
-const resolveCustomerIdWithCookie = async (
-  cookieHeader: string
-): Promise<{ customerId: string; email: string }> => {
-  const session = await parseSessionPayload(cookieHeader);
-  const email = session?.user?.email?.trim() ?? '';
-
-  if (!email) {
-    return {
-      customerId: '',
-      email: '',
-    };
+    return BlackboxAuthService.instance;
   }
 
-  const response = await fetch(CHECK_SUBSCRIPTION_URL, {
-    method: 'POST',
-    headers: buildBaseHeaders({
-      Cookie: cookieHeader,
-      'Content-Type': 'application/json',
-      origin: APP_ORIGIN,
-    }),
-    body: JSON.stringify({ email }),
-  });
+  private hasRuntimeCredentials(): boolean {
+    return LOGIN_EMAIL.trim().length > 0 && LOGIN_PASSWORD.trim().length > 0;
+  }
 
-  if (!response.ok) {
+  private clearRuntimeState() {
+    this.runtimeCookieJar.clear();
+    this.runtimeCustomerId = '';
+    this.runtimeSessionEmail = '';
+  }
+
+  private async fetchWithCookieJar(
+    request: (cookieHeader: string) => Promise<Response>,
+    cookieJar: CookieJar
+  ): Promise<Response> {
+    const response = await request(cookieJar.toHeader());
+    cookieJar.setFromResponse(response);
+    return response;
+  }
+
+  private async parseSessionPayload(
+    cookieHeader: string
+  ): Promise<SessionPayload | null> {
+    if (!cookieHeader) return null;
+
+    const response = await getBlackboxAuthSession({ cookieHeader });
+    if (!response.ok) return null;
+
+    const payload = await response.json().catch(() => null);
+    return payload && typeof payload === 'object'
+      ? (payload as SessionPayload)
+      : null;
+  }
+
+  private async resolveCustomerIdWithCookie(
+    cookieHeader: string
+  ): Promise<{ customerId: string; email: string }> {
+    const session = await this.parseSessionPayload(cookieHeader);
+    const email = session?.user?.email?.trim() ?? '';
+
+    if (!email) {
+      return {
+        customerId: '',
+        email: '',
+      };
+    }
+
+    const response = await checkBlackboxSubscription({
+      cookieHeader,
+      email,
+    });
+
+    if (!response.ok) {
+      return {
+        customerId: '',
+        email,
+      };
+    }
+
+    const payload = await response.json().catch(() => null);
+    const customerId =
+      payload &&
+      typeof payload === 'object' &&
+      typeof payload.customerId === 'string'
+        ? payload.customerId
+        : '';
+
     return {
-      customerId: '',
+      customerId,
       email,
     };
   }
 
-  const payload = await response.json().catch(() => null);
-  const customerId =
-    payload && typeof payload === 'object' && typeof payload.customerId === 'string'
-      ? payload.customerId
-      : '';
+  private async discoverLoginActionId(cookieJar: CookieJar): Promise<string> {
+    const homeResponse = await this.fetchWithCookieJar(
+      (cookieHeader) => getBlackboxHomePage({ cookieHeader }),
+      cookieJar
+    );
+    const html = await homeResponse.text();
+    const scriptPaths = extractScriptPaths(html);
 
-  return {
-    customerId,
-    email,
-  };
-};
+    for (const scriptPath of scriptPaths) {
+      const response = await this.fetchWithCookieJar(
+        (cookieHeader) =>
+          getBlackboxNextScript({
+            scriptPath,
+            cookieHeader,
+          }),
+        cookieJar
+      );
 
-const discoverLoginActionId = async (cookieJar: CookieJar): Promise<string> => {
-  const homeResponse = await fetchWithCookieJar(
-    HOME_URL,
-    {
-      headers: buildBaseHeaders({
-        origin: APP_ORIGIN,
-      }),
-    },
-    cookieJar
-  );
-  const html = await homeResponse.text();
-  const scriptPaths = extractScriptPaths(html);
+      const scriptContent = await response.text();
+      const actionId = extractLoginActionIdFromScript(scriptContent);
+      if (actionId) return actionId;
+    }
 
-  for (const scriptPath of scriptPaths) {
-    const response = await fetchWithCookieJar(
-      new URL(scriptPath, APP_ORIGIN).toString(),
-      {
-        headers: buildBaseHeaders({
-          origin: APP_ORIGIN,
-          referer: HOME_URL,
+    throw new Error('Blackbox login action could not be discovered');
+  }
+
+  private async performRuntimeLogin(): Promise<BlackboxAuthContext> {
+    const cookieJar = new CookieJar();
+    const actionId = await this.discoverLoginActionId(cookieJar);
+
+    const loginResponse = await this.fetchWithCookieJar(
+      (cookieHeader) =>
+        submitBlackboxLogin({
+          actionId,
+          email: LOGIN_EMAIL.trim(),
+          password: LOGIN_PASSWORD,
+          formState: LOGIN_ACTION_FORM_STATE,
+          cookieHeader,
         }),
-      },
       cookieJar
     );
 
-    const scriptContent = await response.text();
-    const actionId = extractLoginActionIdFromScript(scriptContent);
-    if (actionId) return actionId;
-  }
+    const loginText = await loginResponse.text();
+    const cookieHeader = cookieJar.toHeader();
+    const session = await this.parseSessionPayload(cookieHeader);
 
-  throw new Error('Blackbox login action could not be discovered');
-};
+    if (!session?.user?.email) {
+      const errorCode =
+        extractServerActionError(loginText) ??
+        `login_failed_status_${loginResponse.status}`;
+      throw new Error(`Blackbox runtime login failed: ${errorCode}`);
+    }
 
-const performRuntimeLogin = async (): Promise<BlackboxAuthContext> => {
-  const cookieJar = new CookieJar();
-  const actionId = await discoverLoginActionId(cookieJar);
-  const formData = new FormData();
-  formData.append('1_email', LOGIN_EMAIL.trim());
-  formData.append('1_password', LOGIN_PASSWORD);
-  formData.append('0', LOGIN_ACTION_FORM_STATE);
+    const customer = await this.resolveCustomerIdWithCookie(cookieHeader);
 
-  const loginResponse = await fetchWithCookieJar(
-    HOME_URL,
-    {
-      method: 'POST',
-      headers: buildBaseHeaders({
-        accept: 'text/x-component',
-        origin: APP_ORIGIN,
-        referer: HOME_URL,
-        'Next-Action': actionId,
-      }),
-      body: formData,
-    },
-    cookieJar
-  );
+    this.runtimeCookieJar = cookieJar;
+    this.runtimeCustomerId = customer.customerId;
+    this.runtimeSessionEmail = customer.email || session.user.email || '';
+    this.lastFailureAt = 0;
 
-  const loginText = await loginResponse.text();
-  const cookieHeader = cookieJar.toHeader();
-  const session = await parseSessionPayload(cookieHeader);
+    logger.info(
+      `[BlackboxAuth] Runtime login succeeded for ${this.runtimeSessionEmail || 'unknown user'}`
+    );
 
-  if (!session?.user?.email) {
-    const errorCode =
-      extractServerActionError(loginText) ?? `login_failed_status_${loginResponse.status}`;
-    throw new Error(`Blackbox runtime login failed: ${errorCode}`);
-  }
-
-  const customer = await resolveCustomerIdWithCookie(cookieHeader);
-
-  runtimeState.cookieJar = cookieJar;
-  runtimeState.customerId = customer.customerId;
-  runtimeState.sessionEmail = customer.email || session.user.email || '';
-  runtimeState.lastFailureAt = 0;
-
-  logger.info(
-    `[BlackboxAuth] Runtime login succeeded for ${runtimeState.sessionEmail || 'unknown user'}`
-  );
-
-  return {
-    cookieHeader,
-    customerId: customer.customerId,
-    source: 'runtime',
-  };
-};
-
-const getRuntimeAuthContext = async (
-  forceRefresh = false
-): Promise<BlackboxAuthContext> => {
-  if (!hasRuntimeCredentials()) {
     return {
-      cookieHeader: '',
-      customerId: '',
-      source: 'none',
-    };
-  }
-
-  if (forceRefresh) {
-    runtimeState.cookieJar.clear();
-    runtimeState.customerId = '';
-    runtimeState.sessionEmail = '';
-  }
-
-  const cachedCookieHeader = runtimeState.cookieJar.toHeader();
-  if (cachedCookieHeader) {
-    return {
-      cookieHeader: cachedCookieHeader,
-      customerId: runtimeState.customerId,
+      cookieHeader,
+      customerId: customer.customerId,
       source: 'runtime',
     };
   }
 
-  if (
-    !forceRefresh &&
-    runtimeState.lastFailureAt > 0 &&
-    Date.now() - runtimeState.lastFailureAt < LOGIN_RETRY_COOLDOWN_MS
-  ) {
-    return {
-      cookieHeader: '',
-      customerId: '',
-      source: 'none',
-    };
+  private async getRuntimeAuthContext(
+    forceRefresh = false
+  ): Promise<BlackboxAuthContext> {
+    if (!this.hasRuntimeCredentials()) {
+      return {
+        cookieHeader: '',
+        customerId: '',
+        source: 'none',
+      };
+    }
+
+    if (forceRefresh) {
+      this.clearRuntimeState();
+    }
+
+    const cachedCookieHeader = this.runtimeCookieJar.toHeader();
+    if (cachedCookieHeader) {
+      return {
+        cookieHeader: cachedCookieHeader,
+        customerId: this.runtimeCustomerId,
+        source: 'runtime',
+      };
+    }
+
+    if (
+      !forceRefresh &&
+      this.lastFailureAt > 0 &&
+      Date.now() - this.lastFailureAt < LOGIN_RETRY_COOLDOWN_MS
+    ) {
+      return {
+        cookieHeader: '',
+        customerId: '',
+        source: 'none',
+      };
+    }
+
+    if (!this.pendingLogin) {
+      this.pendingLogin = this.performRuntimeLogin()
+        .catch((error: any) => {
+          this.lastFailureAt = Date.now();
+          logger.warn(`[BlackboxAuth] ${error?.message ?? 'Runtime login failed'}`);
+          this.clearRuntimeState();
+          return {
+            cookieHeader: '',
+            customerId: '',
+            source: 'none' as const,
+          };
+        })
+        .finally(() => {
+          this.pendingLogin = null;
+        });
+    }
+
+    return this.pendingLogin;
   }
 
-  if (!runtimeState.pendingLogin) {
-    runtimeState.pendingLogin = performRuntimeLogin()
-      .catch((error: any) => {
-        runtimeState.lastFailureAt = Date.now();
-        logger.warn(`[BlackboxAuth] ${error?.message ?? 'Runtime login failed'}`);
-        runtimeState.cookieJar.clear();
-        runtimeState.customerId = '';
-        runtimeState.sessionEmail = '';
-        return {
-          cookieHeader: '',
-          customerId: '',
-          source: 'none' as const,
-        };
-      })
-      .finally(() => {
-        runtimeState.pendingLogin = null;
-      });
-  }
+  private async getEnvAuthContext(): Promise<BlackboxAuthContext | null> {
+    const sessionToken = SESSION_TOKEN.trim();
+    if (!sessionToken) return null;
 
-  return runtimeState.pendingLogin;
-};
+    const customerId = SUBSCRIPTION_CUSTOMER_ID.trim();
+    if (customerId) {
+      return {
+        cookieHeader: buildEnvSessionCookieHeader(sessionToken),
+        customerId,
+        source: 'env',
+      };
+    }
 
-export const invalidateRuntimeBlackboxAuth = (reason?: string) => {
-  if (reason) {
-    logger.warn(`[BlackboxAuth] Invalidating runtime session: ${reason}`);
-  }
+    if (typeof this.cachedEnvCustomerId === 'undefined') {
+      const resolved = await this.resolveCustomerIdWithCookie(
+        buildEnvSessionCookieHeader(sessionToken)
+      ).catch(() => ({
+        customerId: '',
+        email: '',
+      }));
+      this.cachedEnvCustomerId = resolved.customerId || null;
+    }
 
-  runtimeState.cookieJar.clear();
-  runtimeState.customerId = '';
-  runtimeState.sessionEmail = '';
-};
-
-const getEnvAuthContext = async (): Promise<BlackboxAuthContext | null> => {
-  const sessionToken = SESSION_TOKEN.trim();
-  if (!sessionToken) return null;
-
-  const customerId = SUBSCRIPTION_CUSTOMER_ID.trim();
-  if (customerId) {
     return {
       cookieHeader: buildEnvSessionCookieHeader(sessionToken),
-      customerId,
+      customerId: this.cachedEnvCustomerId ?? '',
       source: 'env',
     };
   }
 
-  if (typeof cachedEnvCustomerId === 'undefined') {
-    const resolved = await resolveCustomerIdWithCookie(
-      buildEnvSessionCookieHeader(sessionToken)
-    ).catch(() => ({
-      customerId: '',
-      email: '',
-    }));
-    cachedEnvCustomerId = resolved.customerId || null;
+  async getAuthContext(forceRefresh = false): Promise<BlackboxAuthContext> {
+    const envAuth = await this.getEnvAuthContext();
+    if (envAuth) return envAuth;
+
+    const runtimeAuth = await this.getRuntimeAuthContext(forceRefresh);
+    const staticCustomerId = SUBSCRIPTION_CUSTOMER_ID.trim();
+
+    return {
+      cookieHeader: runtimeAuth.cookieHeader,
+      customerId: staticCustomerId || runtimeAuth.customerId,
+      source:
+        runtimeAuth.source === 'runtime'
+          ? 'runtime'
+          : staticCustomerId
+            ? 'env'
+            : 'none',
+    };
   }
 
-  return {
-    cookieHeader: buildEnvSessionCookieHeader(sessionToken),
-    customerId: cachedEnvCustomerId ?? '',
-    source: 'env',
-  };
-};
+  invalidateRuntimeSession(reason?: string) {
+    if (reason) {
+      logger.warn(`[BlackboxAuth] Invalidating runtime session: ${reason}`);
+    }
+
+    this.clearRuntimeState();
+  }
+
+  async warmUp() {
+    if (!LOGIN_EAGER && !SESSION_TOKEN.trim()) return;
+    await this.getAuthContext();
+  }
+}
+
+const blackboxAuthService = BlackboxAuthService.getInstance();
+
+export default blackboxAuthService;
 
 export const getBlackboxAuthContext = async (
   forceRefresh = false
-): Promise<BlackboxAuthContext> => {
-  const envAuth = await getEnvAuthContext();
-  if (envAuth) return envAuth;
+): Promise<BlackboxAuthContext> =>
+  blackboxAuthService.getAuthContext(forceRefresh);
 
-  const runtimeAuth = await getRuntimeAuthContext(forceRefresh);
-  const staticCustomerId = SUBSCRIPTION_CUSTOMER_ID.trim();
-
-  return {
-    cookieHeader: runtimeAuth.cookieHeader,
-    customerId: staticCustomerId || runtimeAuth.customerId,
-    source:
-      runtimeAuth.source === 'runtime'
-        ? 'runtime'
-        : staticCustomerId
-          ? 'env'
-          : 'none',
-  };
-};
+export const invalidateRuntimeBlackboxAuth = (reason?: string) =>
+  blackboxAuthService.invalidateRuntimeSession(reason);
 
 export const warmBlackboxAuth = async () => {
-  if (!LOGIN_EAGER && !SESSION_TOKEN.trim()) return;
-  await getBlackboxAuthContext();
+  await blackboxAuthService.warmUp();
 };
