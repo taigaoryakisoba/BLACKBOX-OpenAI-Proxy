@@ -62,7 +62,7 @@ npm start
 |--------|-------------|------|
 | `PORT` | `3000` | サーバーがリスンするポート |
 | `BLACKBOX_API_ENDPOINT` | `https://app.blackbox.ai/api/chat` | BLACKBOX AI の API エンドポイント |
-| `BLACKBOX_VALIDATION_TOKEN` | `''` | 認証トークン（必要な場合） |
+| `BLACKBOX_VALIDATION_TOKEN` | `''` | 認証トークン。未設定時は live bundle から自動検出 |
 | `BLACKBOX_MAX_TOKENS` | `1024` | 最大トーク数 |
 | `BLACKBOX_CUSTOMER_ID` | `''` | サブスクライバー ID |
 | `BLACKBOX_SESSION_TOKEN` | `''` | セッショントークン |
@@ -86,6 +86,12 @@ console.log(JSON.parse(localStorage.getItem('subscription-cache') || '{}').custo
 1. `BLACKBOX_SESSION_TOKEN` / `BLACKBOX_CUSTOMER_ID` が設定されている場合は、それらを優先します。
 2. 上記が未設定で `BLACKBOX_LOGIN_EMAIL` / `BLACKBOX_LOGIN_PASSWORD` がある場合は、起動中に `app.blackbox.ai` へ自動ログインしてセッション Cookie と `customerId` を取得します。
 3. どちらも未設定の場合は、従来どおり未ログイン状態で upstream を呼びます。
+
+### validated の優先順位
+
+1. `BLACKBOX_VALIDATION_TOKEN` が設定されている場合は、それを優先します。
+2. 未設定の場合は、`app.blackbox.ai` の live bundle から `validated` に使う token を自動検出します。
+3. 自動検出した token で `403` が返った場合は、token cache を破棄して 1 回だけ再検出します。
 
 ## 📚 API ドキュメント
 

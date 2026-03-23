@@ -3,7 +3,6 @@ import {
   DEFAULT_USER_SELECTED_AGENT,
   DEFAULT_WORKSPACE_ID,
   SUBSCRIPTION_CUSTOMER_ID,
-  VALIDATION_TOKEN,
 } from '../../../configs/env';
 import { BLACKBOX_CHAT_URL, BlackboxApiClient } from '../apiClient';
 
@@ -44,7 +43,7 @@ export const buildBlackboxChatPayload = ({
     isMemoryEnabled: false,
     mobileClient: false,
     userSelectedAgent: DEFAULT_USER_SELECTED_AGENT,
-    validated: VALIDATION_TOKEN,
+    validated: '',
     imageGenerationMode: false,
     imageGenMode: 'autoMode',
     webSearchModePrompt: false,

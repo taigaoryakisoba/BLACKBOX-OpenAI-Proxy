@@ -5,6 +5,8 @@ import {
 import { BlackboxApiClient } from '../api/blackbox/apiClient';
 import type { BlackboxAuthContext } from './blackbox-auth';
 import blackboxAuthService from './blackbox-auth';
+import type { BlackboxValidationContext } from './blackbox-validation';
+import blackboxValidationService from './blackbox-validation';
 import logger from './logger';
 
 interface BlackboxRequestContext {
@@ -53,12 +55,23 @@ class BlackboxChatService {
     };
   }
 
-  private shouldRetryWithFreshRuntimeSession(
+  private applyValidationTokenToPayload(payload: any, token: string) {
+    return {
+      ...payload,
+      validated: token,
+    };
+  }
+
+  private shouldRetryWithFreshRuntimeContext(
     status: number,
     details: string,
-    auth: BlackboxAuthContext
+    auth: BlackboxAuthContext,
+    validation: BlackboxValidationContext
   ): boolean {
-    if (auth.source !== 'runtime') return false;
+    const hasRuntimeContext =
+      auth.source === 'runtime' || validation.source === 'runtime';
+
+    if (!hasRuntimeContext) return false;
     if (status === 401 || status === 403) return true;
 
     return /login is required|session|unauthorized|forbidden/i.test(details);
@@ -72,8 +85,13 @@ class BlackboxChatService {
   ): Promise<Response> {
     const reqId = ctx.reqId ?? 'n/a';
     const auth = await blackboxAuthService.getAuthContext(forceRefresh);
+    const validation =
+      await blackboxValidationService.getValidationContext(forceRefresh);
     const headers = this.buildRequestHeaders(auth.cookieHeader);
-    const resolvedPayload = this.applyCustomerIdToPayload(payload, auth.customerId);
+    const resolvedPayload = this.applyValidationTokenToPayload(
+      this.applyCustomerIdToPayload(payload, auth.customerId),
+      validation.token
+    );
 
     logger.debug(`[${reqId}] [UPSTREAM REQUEST] POST /api/chat`);
     logger.debug(
@@ -110,11 +128,23 @@ class BlackboxChatService {
 
     if (
       !forceRefresh &&
-      this.shouldRetryWithFreshRuntimeSession(response.status, rawText, auth)
+      this.shouldRetryWithFreshRuntimeContext(
+        response.status,
+        rawText,
+        auth,
+        validation
+      )
     ) {
-      blackboxAuthService.invalidateRuntimeSession(
-        `upstream returned ${response.status} ${response.statusText || ''}`.trim()
-      );
+      const reason = `upstream returned ${response.status} ${response.statusText || ''}`.trim();
+
+      if (auth.source === 'runtime') {
+        blackboxAuthService.invalidateRuntimeSession(reason);
+      }
+
+      if (validation.source === 'runtime') {
+        blackboxValidationService.invalidateRuntimeToken(reason);
+      }
+
       return this.request(payload, ctx, options, true);
     }
 
