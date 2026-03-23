@@ -2,6 +2,11 @@ import { Request, Response } from 'express';
 import { MAX_TOKENS_DEFAULT, DEBUG_MAX_CHARS } from '../../../configs/env';
 import { MODEL_CONFIG } from '../../../configs/models';
 import {
+  ResponseParamsSchema,
+  ResponsesBodySchema,
+  ResponsesCompactBodySchema,
+} from '../../../schemas/openai';
+import {
   resolveModel,
   genId,
   genShortId,
@@ -19,6 +24,8 @@ import {
   normalizeResponsesInputToOpenAiMessages,
   normalizeMessagesToBlackboxShape,
   sendOpenAIError,
+  sendKnownRequestError,
+  sendValidationError,
   buildToolSystemPrompt,
   detectToolCalls,
   extractThinkingSections,
@@ -374,7 +381,12 @@ const runBackgroundResponse = async ({
 };
 
 export const retrieveResponse = async (req: Request, res: Response) => {
-  const record = responsesStore.getRecord(String(req.params.responseId ?? ''));
+  const responseParamsValidation = ResponseParamsSchema.safeParse(req.params);
+  if (!responseParamsValidation.success) {
+    return sendValidationError(res, responseParamsValidation.error.issues);
+  }
+
+  const record = responsesStore.getRecord(responseParamsValidation.data.responseId);
   if (!record) {
     return sendOpenAIError(res, 404, 'Response not found', 'response_not_found');
   }
@@ -393,7 +405,12 @@ export const retrieveResponse = async (req: Request, res: Response) => {
 };
 
 export const cancelResponse = async (req: Request, res: Response) => {
-  const record = responsesStore.cancel(String(req.params.responseId ?? ''));
+  const responseParamsValidation = ResponseParamsSchema.safeParse(req.params);
+  if (!responseParamsValidation.success) {
+    return sendValidationError(res, responseParamsValidation.error.issues);
+  }
+
+  const record = responsesStore.cancel(responseParamsValidation.data.responseId);
   if (!record) {
     return sendOpenAIError(res, 404, 'Response not found', 'response_not_found');
   }
@@ -412,7 +429,12 @@ export const cancelResponse = async (req: Request, res: Response) => {
 };
 
 export const compact = async (req: Request, res: Response) => {
-  const body = req.body ?? {};
+  const compactValidation = ResponsesCompactBodySchema.safeParse(req.body ?? {});
+  if (!compactValidation.success) {
+    return sendValidationError(res, compactValidation.error.issues);
+  }
+
+  const body = compactValidation.data;
   const reqId = (req as any).reqId ?? genId();
 
   const resolved = resolveModel(MODEL_CONFIG, body.model);
@@ -464,6 +486,9 @@ export const compact = async (req: Request, res: Response) => {
       ],
     });
   } catch (error: any) {
+    const knownError = sendKnownRequestError(res, error);
+    if (knownError) return knownError;
+
     logger.error(`[${reqId}] [/v1/responses/compact] Error:`, error);
     return res.status(500).json({
       error: {
@@ -477,7 +502,12 @@ export const compact = async (req: Request, res: Response) => {
 };
 
 export const responses = async (req: Request, res: Response) => {
-  const body = req.body ?? {};
+  const responsesValidation = ResponsesBodySchema.safeParse(req.body ?? {});
+  if (!responsesValidation.success) {
+    return sendValidationError(res, responsesValidation.error.issues);
+  }
+
+  const body = responsesValidation.data;
   const reqId = (req as any).reqId ?? genId();
 
   const resolved = resolveModel(MODEL_CONFIG, body.model);
@@ -843,6 +873,9 @@ export const responses = async (req: Request, res: Response) => {
     completeStoredResponse(responseId, responseBody, nowUnix());
     return res.json(responseBody);
   } catch (error: any) {
+    const knownError = sendKnownRequestError(res, error);
+    if (knownError) return knownError;
+
     logger.error(`[${reqId}] [/v1/responses] Error:`, error);
     responsesStore.failRecord(responseId, {
       message: error?.message ?? 'Unknown error',

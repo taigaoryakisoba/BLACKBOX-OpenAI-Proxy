@@ -1,3 +1,4 @@
+import type { ZodIssue } from 'zod';
 import { ToolCall, OpenAIMessage, BlackboxMessage } from '../types';
 import {
   ChatCompletionChunk,
@@ -1285,10 +1286,59 @@ export const sendOpenAIError = (
   res: any,
   status: number,
   message: string,
-  code: string | null
+  code: string | null,
+  details?: unknown
 ) => {
   const errorResponse: ErrorResponse = {
-    error: { message, type: 'invalid_request_error', code: code ?? null },
+    error: {
+      message,
+      type: 'invalid_request_error',
+      code: code ?? null,
+      ...(typeof details !== 'undefined' ? { details } : {}),
+    },
   };
   return res.status(status).json(errorResponse);
+};
+
+const formatValidationIssuePath = (path: PropertyKey[]): string =>
+  path
+    .map((segment) =>
+      typeof segment === 'number' ? `[${segment}]` : String(segment)
+    )
+    .join('.')
+    .replace(/\.\[/g, '[');
+
+const buildValidationMessage = (issues: ZodIssue[]): string =>
+  issues
+    .map((issue) => {
+      const issuePath = formatValidationIssuePath(issue.path);
+      return issuePath ? `${issuePath}: ${issue.message}` : issue.message;
+    })
+    .join('; ');
+
+export const sendValidationError = (res: any, issues: ZodIssue[]) =>
+  sendOpenAIError(
+    res,
+    400,
+    buildValidationMessage(issues) || 'Validation Error',
+    'validation_error',
+    issues
+  );
+
+export const sendKnownRequestError = (res: any, error: any) => {
+  if (
+    typeof error?.status === 'number' &&
+    error.status >= 400 &&
+    error.status < 500
+  ) {
+    return sendOpenAIError(
+      res,
+      error.status,
+      error?.message ?? 'Invalid request',
+      typeof error?.code === 'string' ? error.code : 'invalid_request',
+      error?.details
+    );
+  }
+
+  return null;
 };

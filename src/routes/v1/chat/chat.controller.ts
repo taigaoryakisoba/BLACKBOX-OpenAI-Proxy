@@ -4,6 +4,7 @@ import {
   DEBUG_MAX_CHARS,
 } from '../../../configs/env';
 import { MODEL_CONFIG } from '../../../configs/models';
+import { ChatCompletionsBodySchema } from '../../../schemas/openai';
 import {
   resolveModel,
   genId,
@@ -21,6 +22,7 @@ import {
 import {
   normalizeMessagesToBlackboxShape,
   sendOpenAIError,
+  sendValidationError,
   makeChatCompletionChunk,
   buildToolSystemPrompt,
   detectToolCalls,
@@ -34,7 +36,14 @@ import logger from '../../../services/logger';
 
 export const chatCompletions = async (req: Request, res: Response) => {
   const startTime = Date.now();
-  const body = req.body ?? {};
+  const chatCompletionValidation = ChatCompletionsBodySchema.safeParse(
+    req.body ?? {}
+  );
+  if (!chatCompletionValidation.success) {
+    return sendValidationError(res, chatCompletionValidation.error.issues);
+  }
+
+  const body = chatCompletionValidation.data;
   const reqId = (req as any).reqId ?? genId();
 
   const resolved = resolveModel(MODEL_CONFIG, body.model);
@@ -53,7 +62,7 @@ export const chatCompletions = async (req: Request, res: Response) => {
       : MAX_TOKENS_DEFAULT;
 
   // ツール定義がある場合、システムプロンプトにツール使用方法を注入する
-  const openAiMessages = Array.isArray(body.messages) ? [...body.messages] : [];
+  const openAiMessages = [...body.messages];
   if (Array.isArray(body.tools) && body.tools.length > 0) {
     const toolPrompt = buildToolSystemPrompt(body.tools, {
       parallelToolCalls: body.parallel_tool_calls,
