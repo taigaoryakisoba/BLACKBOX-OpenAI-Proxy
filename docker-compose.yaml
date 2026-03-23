@@ -11,3 +11,15 @@ services:
     # 初期設定も含めて実行
     command: bash -c "npm install -g typescript tsc-alias && npm i && npm run build && npm run start"
     restart: always
+
+  cloudflared:
+    image: cloudflare/cloudflared
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+    network_mode: service:blackbox-proxy
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+      - TUNNEL_TRANSPORT_PROTOCOL=http2
+    restart: always

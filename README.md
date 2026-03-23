@@ -61,6 +61,7 @@ npm start
 | 変数名 | デフォルト値 | 説明 |
 |--------|-------------|------|
 | `PORT` | `3000` | サーバーがリスンするポート |
+| `PROXY_BEARER_TOKEN` | `''` | プロキシ自体の Bearer 認証トークン。未設定時は認証なし |
 | `BLACKBOX_API_ENDPOINT` | `https://app.blackbox.ai/api/chat` | BLACKBOX AI の API エンドポイント |
 | `BLACKBOX_VALIDATION_TOKEN` | `''` | 認証トークン。未設定時は live bundle から自動検出 |
 | `BLACKBOX_MAX_TOKENS` | `1024` | 最大トーク数 |
@@ -74,6 +75,10 @@ npm start
 | `CORS_ORIGINS` | `''` | 許可された CORS オリジン（カンマ区切り） |
 | `DEBUG_LOG` | `false` | デバッグログを有効化 |
 | `DEBUG_MAX_CHARS` | `10` | デバッグログの最大文字数 |
+| `CLOUDFLARE_TUNNEL_TOKEN` | `` | CloudFlare Zero Trust Tunnel用Token |
+
+`PROXY_BEARER_TOKEN` を設定した場合、各 API リクエストに `Authorization: Bearer <token>` ヘッダーが必要です。  
+未設定の場合は従来どおり認証なしで利用できます。
 
 `BLACKBOX_CUSTOMER_ID` は有料アカウントを利用していない場合は必要ありません。
 有料アカウントの場合は、開発者モードで以下のスクリプトを実行し、取得した値を入れてください。  

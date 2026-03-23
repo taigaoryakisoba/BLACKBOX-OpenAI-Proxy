@@ -3,6 +3,7 @@ import { config } from 'dotenv';
 config(); // Load .env if present
 
 export const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+export const PROXY_BEARER_TOKEN = process.env.PROXY_BEARER_TOKEN ?? '';
 export const API_ENDPOINT =
   process.env.BLACKBOX_API_ENDPOINT ?? 'https://app.blackbox.ai/api/chat';
 export const VALIDATION_TOKEN = process.env.BLACKBOX_VALIDATION_TOKEN ?? '';
