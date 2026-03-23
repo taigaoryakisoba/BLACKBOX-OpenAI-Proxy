@@ -7,6 +7,10 @@ import {
   SUBSCRIPTION_CUSTOMER_ID,
   VALIDATION_TOKEN,
 } from '../configs/env';
+import {
+  getBlackboxAuthContext,
+  invalidateRuntimeBlackboxAuth,
+} from '../services/blackbox-auth';
 import logger from '../services/logger';
 
 export const buildBlackboxPayload = ({
@@ -91,6 +95,28 @@ export const buildBlackboxPayload = ({
   };
 };
 
+const buildRequestHeaders = (cookieHeader: string): Record<string, string> => ({
+  ...BASE_HEADERS,
+  ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+});
+
+const applyCustomerIdToPayload = (payload: any, customerId: string) => ({
+  ...payload,
+  isPremium: !!customerId,
+  subscriptionCache: customerId ? { customerId } : undefined,
+});
+
+const shouldRetryWithFreshRuntimeSession = (
+  status: number,
+  details: string,
+  source: string
+): boolean => {
+  if (source !== 'runtime') return false;
+  if (status === 401 || status === 403) return true;
+
+  return /login is required|session|unauthorized|forbidden/i.test(details);
+};
+
 export const callBlackboxAPIJson = async (
   payload: any,
   ctx: any = {},
@@ -99,42 +125,61 @@ export const callBlackboxAPIJson = async (
   const reqId = ctx.reqId ?? 'n/a';
   const signal = ctx.signal;
 
-  logger.debug(`[${reqId}] [UPSTREAM REQUEST] POST ${API_ENDPOINT}`);
-  logger.debug(
-    `[${reqId}] [UPSTREAM REQUEST] headers=${safeJson(redactHeaders(BASE_HEADERS), DEBUG_MAX_CHARS)}`
-  );
-  logger.debug(
-    `[${reqId}] [UPSTREAM REQUEST] payload=${safeJson(payload, DEBUG_MAX_CHARS)}`
-  );
+  const requestOnce = async (forceRefresh = false) => {
+    const auth = await getBlackboxAuthContext(forceRefresh);
+    const headers = buildRequestHeaders(auth.cookieHeader);
+    const resolvedPayload = applyCustomerIdToPayload(payload, auth.customerId);
 
-  const response = await fetch(API_ENDPOINT, {
-    method: 'POST',
-    headers: BASE_HEADERS,
-    body: JSON.stringify(payload),
-    signal,
-  });
+    logger.debug(`[${reqId}] [UPSTREAM REQUEST] POST ${API_ENDPOINT}`);
+    logger.debug(
+      `[${reqId}] [UPSTREAM REQUEST] headers=${safeJson(redactHeaders(headers), DEBUG_MAX_CHARS)}`
+    );
+    logger.debug(
+      `[${reqId}] [UPSTREAM REQUEST] payload=${safeJson(resolvedPayload, DEBUG_MAX_CHARS)}`
+    );
 
-  const status = response.status;
-  const statusText = response.statusText;
+    const response = await fetch(API_ENDPOINT, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(resolvedPayload),
+      signal,
+    });
 
-  const rawText = await response.text().catch(() => '');
-  logger.debug(`[${reqId}] [UPSTREAM RESPONSE] status=${status} ${statusText}`);
-  logger.debug(
-    `[${reqId}] [UPSTREAM RESPONSE] body=${rawText.length ? rawText.slice(0, DEBUG_MAX_CHARS) : ''}${rawText.length > DEBUG_MAX_CHARS ? '... (truncated)' : ''}`
-  );
+    const status = response.status;
+    const statusText = response.statusText;
+    const rawText = await response.text().catch(() => '');
 
-  if (!response.ok) {
-    const error: any = new Error(`Blackbox API error: ${status} ${statusText}`);
-    error.status = status;
-    error.details = rawText;
-    throw error;
-  }
+    logger.debug(`[${reqId}] [UPSTREAM RESPONSE] status=${status} ${statusText}`);
+    logger.debug(
+      `[${reqId}] [UPSTREAM RESPONSE] body=${rawText.length ? rawText.slice(0, DEBUG_MAX_CHARS) : ''}${rawText.length > DEBUG_MAX_CHARS ? '... (truncated)' : ''}`
+    );
 
-  try {
-    return rawText ? JSON.parse(rawText) : null;
-  } catch {
-    return rawText;
-  }
+    if (
+      !response.ok &&
+      !forceRefresh &&
+      shouldRetryWithFreshRuntimeSession(status, rawText, auth.source)
+    ) {
+      invalidateRuntimeBlackboxAuth(
+        `upstream returned ${status} ${statusText || ''}`.trim()
+      );
+      return requestOnce(true);
+    }
+
+    if (!response.ok) {
+      const error: any = new Error(`Blackbox API error: ${status} ${statusText}`);
+      error.status = status;
+      error.details = rawText;
+      throw error;
+    }
+
+    try {
+      return rawText ? JSON.parse(rawText) : null;
+    } catch {
+      return rawText;
+    }
+  };
+
+  return requestOnce();
 };
 
 export const callBlackboxAPIStream = async (
@@ -145,42 +190,61 @@ export const callBlackboxAPIStream = async (
   const reqId = ctx.reqId ?? 'n/a';
   const signal = ctx.signal;
 
-  logger.debug(`[${reqId}] [UPSTREAM REQUEST] POST ${API_ENDPOINT} (stream)`);
-  logger.debug(
-    `[${reqId}] [UPSTREAM REQUEST] headers=${safeJson(redactHeaders(BASE_HEADERS), DEBUG_MAX_CHARS)}`
-  );
-  logger.debug(
-    `[${reqId}] [UPSTREAM REQUEST] payload=${safeJson(payload, DEBUG_MAX_CHARS)}`
-  );
+  const requestOnce = async (forceRefresh = false): Promise<Response> => {
+    const auth = await getBlackboxAuthContext(forceRefresh);
+    const headers = buildRequestHeaders(auth.cookieHeader);
+    const resolvedPayload = applyCustomerIdToPayload(payload, auth.customerId);
 
-  const response = await fetch(API_ENDPOINT, {
-    method: 'POST',
-    headers: BASE_HEADERS as any,
-    body: JSON.stringify(payload),
-    signal,
-  });
-
-  logger.debug(
-    `[${reqId}] [UPSTREAM RESPONSE] status=${response.status} ${response.statusText} (stream)`
-  );
-
-  if (!response.ok) {
-    const rawText = await response.text().catch(() => '');
-    const error: any = new Error(
-      `Blackbox API error: ${response.status} ${response.statusText}`
+    logger.debug(`[${reqId}] [UPSTREAM REQUEST] POST ${API_ENDPOINT} (stream)`);
+    logger.debug(
+      `[${reqId}] [UPSTREAM REQUEST] headers=${safeJson(redactHeaders(headers), DEBUG_MAX_CHARS)}`
     );
-    error.status = response.status;
-    error.details = rawText;
-    throw error;
-  }
-
-  if (!response.body) {
-    const error: any = new Error(
-      'Upstream returned no body (stream not available)'
+    logger.debug(
+      `[${reqId}] [UPSTREAM REQUEST] payload=${safeJson(resolvedPayload, DEBUG_MAX_CHARS)}`
     );
-    error.status = 502;
-    throw error;
-  }
 
-  return response;
+    const response = await fetch(API_ENDPOINT, {
+      method: 'POST',
+      headers: headers as any,
+      body: JSON.stringify(resolvedPayload),
+      signal,
+    });
+
+    logger.debug(
+      `[${reqId}] [UPSTREAM RESPONSE] status=${response.status} ${response.statusText} (stream)`
+    );
+
+    if (!response.ok) {
+      const rawText = await response.text().catch(() => '');
+
+      if (
+        !forceRefresh &&
+        shouldRetryWithFreshRuntimeSession(response.status, rawText, auth.source)
+      ) {
+        invalidateRuntimeBlackboxAuth(
+          `upstream stream returned ${response.status} ${response.statusText || ''}`.trim()
+        );
+        return requestOnce(true);
+      }
+
+      const error: any = new Error(
+        `Blackbox API error: ${response.status} ${response.statusText}`
+      );
+      error.status = response.status;
+      error.details = rawText;
+      throw error;
+    }
+
+    if (!response.body) {
+      const error: any = new Error(
+        'Upstream returned no body (stream not available)'
+      );
+      error.status = 502;
+      throw error;
+    }
+
+    return response;
+  };
+
+  return requestOnce();
 };

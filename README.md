@@ -66,6 +66,10 @@ npm start
 | `BLACKBOX_MAX_TOKENS` | `1024` | 最大トーク数 |
 | `BLACKBOX_CUSTOMER_ID` | `''` | サブスクライバー ID |
 | `BLACKBOX_SESSION_TOKEN` | `''` | セッショントークン |
+| `BLACKBOX_LOGIN_EMAIL` | `''` | BLACKBOX へ自動ログインするメールアドレス |
+| `BLACKBOX_LOGIN_PASSWORD` | `''` | BLACKBOX へ自動ログインするパスワード |
+| `BLACKBOX_LOGIN_EAGER` | `false` | 起動直後にログインをウォームアップするか<br>起動前にログインを試みます |
+| `BLACKBOX_LOGIN_RETRY_COOLDOWN_MS` | `60000` | 自動ログイン失敗後の再試行待機時間 |
 | `BLACKBOX_USER_SELECTED_AGENT` | `VscodeAgent` | デフォルトのエージェント |
 | `CORS_ORIGINS` | `''` | 許可された CORS オリジン（カンマ区切り） |
 | `DEBUG_LOG` | `false` | デバッグログを有効化 |
@@ -76,6 +80,12 @@ npm start
 ```js
 console.log(JSON.parse(localStorage.getItem('subscription-cache') || '{}').customerId);
 ```
+
+### 認証の優先順位
+
+1. `BLACKBOX_SESSION_TOKEN` / `BLACKBOX_CUSTOMER_ID` が設定されている場合は、それらを優先します。
+2. 上記が未設定で `BLACKBOX_LOGIN_EMAIL` / `BLACKBOX_LOGIN_PASSWORD` がある場合は、起動中に `app.blackbox.ai` へ自動ログインしてセッション Cookie と `customerId` を取得します。
+3. どちらも未設定の場合は、従来どおり未ログイン状態で upstream を呼びます。
 
 ## 📚 API ドキュメント
 

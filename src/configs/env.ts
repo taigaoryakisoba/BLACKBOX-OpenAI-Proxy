@@ -12,6 +12,12 @@ export const MAX_TOKENS_DEFAULT = Number(
 
 export const SUBSCRIPTION_CUSTOMER_ID = process.env.BLACKBOX_CUSTOMER_ID ?? '';
 export const SESSION_TOKEN = process.env.BLACKBOX_SESSION_TOKEN ?? '';
+export const LOGIN_EMAIL = process.env.BLACKBOX_LOGIN_EMAIL ?? '';
+export const LOGIN_PASSWORD = process.env.BLACKBOX_LOGIN_PASSWORD ?? '';
+export const LOGIN_EAGER = (process.env.BLACKBOX_LOGIN_EAGER ?? 'false') === 'true';
+export const LOGIN_RETRY_COOLDOWN_MS = Number(
+  process.env.BLACKBOX_LOGIN_RETRY_COOLDOWN_MS ?? 60_000
+);
 
 export const DEFAULT_USER_SELECTED_AGENT =
   process.env.BLACKBOX_USER_SELECTED_AGENT ?? 'VscodeAgent';
@@ -82,7 +88,4 @@ export const BASE_HEADERS = Object.freeze({
   pragma: 'no-cache',
   'user-agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-  ...(SESSION_TOKEN
-    ? { Cookie: `next-auth.session-token=${SESSION_TOKEN}` }
-    : {}),
 });
