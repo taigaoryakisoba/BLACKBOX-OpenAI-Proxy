@@ -100,45 +100,103 @@ const normalizeMessageRole = (role: string): string => {
   return role;
 };
 
+const RAW_CUSTOM_TOOL_NAMES = new Set([
+  'apply_patch',
+  'js_repl',
+  'artifacts',
+  'exec',
+]);
+
+const stringifyStructuredToolEnvelope = (toolCall: Record<string, unknown>) =>
+  JSON.stringify({ tool_calls: [toolCall] }, null, 2);
+
 const serializePendingToolCall = (
   item: any,
-  kind: 'function' | 'custom' | 'local_shell' | 'tool_search'
+  kind:
+    | 'function'
+    | 'custom'
+    | 'local_shell'
+    | 'tool_search'
+    | 'web_search'
+    | 'image_generation'
 ): string => {
   if (kind === 'function') {
-    return `<function_call name="${item.name ?? 'unknown'}" call_id="${
-      item.call_id ?? `call_${genShortId()}`
-    }">\n${item.arguments ?? '{}'}\n</function_call>`;
+    return stringifyStructuredToolEnvelope({
+      type: 'function',
+      name: item.name ?? 'unknown',
+      call_id: item.call_id ?? `call_${genShortId()}`,
+      arguments: parseLooseJsonValue(String(item.arguments ?? '')) ?? item.arguments ?? {},
+    });
   }
 
   if (kind === 'custom') {
-    return `<custom_tool_call name="${item.name ?? 'unknown'}" call_id="${
-      item.call_id ?? `call_${genShortId()}`
-    }">\n${item.input ?? ''}\n</custom_tool_call>`;
+    const name = item.name ?? 'unknown';
+    const input =
+      typeof item.input === 'string' ? item.input : String(item.input ?? '');
+
+    if (RAW_CUSTOM_TOOL_NAMES.has(name)) {
+      return input;
+    }
+
+    return stringifyStructuredToolEnvelope({
+      type: 'custom',
+      name,
+      call_id: item.call_id ?? `call_${genShortId()}`,
+      input,
+    });
   }
 
   if (kind === 'local_shell') {
-    return `<local_shell_call call_id="${
-      item.call_id ?? `call_${genShortId()}`
-    }">\n${JSON.stringify(
-      {
-        status: item.status ?? null,
-        action: item.action ?? null,
-      },
-      null,
-      2
-    )}\n</local_shell_call>`;
+    const payload = {
+      type: 'local_shell',
+      call_id: item.call_id ?? `call_${genShortId()}`,
+      ...buildDetectedCall(
+        {
+          kind: 'local_shell',
+          name: 'local_shell',
+          description: '',
+          rawTool: item,
+        },
+        item,
+        'local_shell'
+      ).payload,
+    };
+
+    return stringifyStructuredToolEnvelope(payload);
   }
 
-  return `<tool_search_call call_id="${
-    item.call_id ?? `call_${genShortId()}`
-  }">\n${JSON.stringify(
-    {
+  if (kind === 'tool_search') {
+    return stringifyStructuredToolEnvelope({
+      type: 'tool_search',
+      call_id: item.call_id ?? `call_${genShortId()}`,
       execution: item.execution ?? 'client',
-      arguments: item.arguments ?? {},
-    },
-    null,
-    2
-  )}\n</tool_search_call>`;
+      arguments:
+        parseLooseJsonValue(String(item.arguments ?? '')) ?? item.arguments ?? {},
+    });
+  }
+
+  if (kind === 'web_search') {
+    const query =
+      item.query ??
+      item.action?.query ??
+      (Array.isArray(item.queries) ? item.queries[0] : null);
+    const queries = item.queries ?? item.action?.queries ?? null;
+
+    return stringifyStructuredToolEnvelope({
+      type: 'web_search',
+      call_id: item.call_id ?? `call_${genShortId()}`,
+      ...(typeof query === 'string' ? { query } : {}),
+      ...(Array.isArray(queries) ? { queries } : {}),
+    });
+  }
+
+  const prompt = item.revised_prompt ?? item.prompt ?? '';
+
+  return stringifyStructuredToolEnvelope({
+    type: 'image_generation',
+    call_id: item.call_id ?? `call_${genShortId()}`,
+    ...(typeof prompt === 'string' && prompt ? { prompt } : {}),
+  });
 };
 
 const serializeToolOutput = (
@@ -230,6 +288,16 @@ export const normalizeResponsesInputToOpenAiMessages = (
 
     if (item.type === 'tool_search_call') {
       pendingToolCalls.push(serializePendingToolCall(item, 'tool_search'));
+      continue;
+    }
+
+    if (item.type === 'web_search_call') {
+      pendingToolCalls.push(serializePendingToolCall(item, 'web_search'));
+      continue;
+    }
+
+    if (item.type === 'image_generation_call') {
+      pendingToolCalls.push(serializePendingToolCall(item, 'image_generation'));
       continue;
     }
 
@@ -779,6 +847,11 @@ const parseSingleJsonCandidate = (text: string): any[] => {
   return [];
 };
 
+const parseLooseJsonValue = (text: string): any => {
+  const [parsed] = parseSingleJsonCandidate(text);
+  return parsed === undefined ? null : parsed;
+};
+
 const normalizeCallArgumentsText = (args: any): string => {
   if (typeof args === 'string') return args;
   try {
@@ -816,17 +889,23 @@ const buildDetectedCall = (
         ? {
             command: Array.isArray(value.command)
               ? value.command
+              : Array.isArray(value.action?.command)
+                ? value.action.command
               : Array.isArray(value.parameters?.command)
                 ? value.parameters.command
                 : [],
             workdir:
               value.workdir ??
               value.working_directory ??
+              value.action?.working_directory ??
               value.parameters?.workdir ??
               value.parameters?.working_directory ??
               null,
             timeout_ms:
-              value.timeout_ms ?? value.parameters?.timeout_ms ?? null,
+              value.timeout_ms ??
+              value.action?.timeout_ms ??
+              value.parameters?.timeout_ms ??
+              null,
           }
         : { command: [] };
 
@@ -845,7 +924,28 @@ const buildDetectedCall = (
   ) {
     const payload =
       value && typeof value === 'object'
-        ? (value.arguments ?? value.parameters ?? value)
+        ? kind === 'web_search'
+          ? {
+              query:
+                value.query ??
+                value.action?.query ??
+                value.parameters?.query ??
+                null,
+              queries:
+                value.queries ??
+                value.action?.queries ??
+                value.parameters?.queries ??
+                null,
+            }
+          : kind === 'image_generation'
+            ? {
+                prompt:
+                  value.prompt ??
+                  value.revised_prompt ??
+                  value.parameters?.prompt ??
+                  null,
+              }
+            : (value.arguments ?? value.parameters ?? value)
         : {};
     return {
       kind,
@@ -962,6 +1062,102 @@ const collectToolCallsFromJson = (
   }
 };
 
+const extractTagAttribute = (
+  attrsText: string,
+  attributeName: string
+): string | null => {
+  const match = attrsText.match(
+    new RegExp(`${attributeName}="([^"]*)"`, 'i')
+  );
+  return match?.[1] ?? null;
+};
+
+const collectToolCallsFromTaggedText = (
+  text: string,
+  toolMap: Map<string, NormalizedToolDefinition>,
+  toolCalls: ToolCall[]
+) => {
+  const tagRegex =
+    /<(function_call|custom_tool_call|local_shell_call|tool_search_call|web_search_call|image_generation_call)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = tagRegex.exec(text)) !== null) {
+    const tagName = match[1].toLowerCase();
+    const attrsText = match[2] ?? '';
+    const rawBody = match[3] ?? '';
+    const body = rawBody.trim();
+
+    if (tagName === 'function_call') {
+      const name = extractTagAttribute(attrsText, 'name');
+      if (!name) continue;
+      const tool = toolMap.get(name);
+      if (!tool) continue;
+      toolCalls.push(buildDetectedCall(tool, body, 'function'));
+      continue;
+    }
+
+    if (tagName === 'custom_tool_call') {
+      const name = extractTagAttribute(attrsText, 'name');
+      if (!name) continue;
+      const tool = toolMap.get(name);
+      if (!tool) continue;
+      toolCalls.push(buildDetectedCall(tool, body, 'custom'));
+      continue;
+    }
+
+    if (tagName === 'local_shell_call') {
+      const tool = toolMap.get('local_shell');
+      if (!tool) continue;
+      toolCalls.push(
+        buildDetectedCall(
+          tool,
+          parseLooseJsonValue(body) ?? { command: [] },
+          'local_shell'
+        )
+      );
+      continue;
+    }
+
+    if (tagName === 'tool_search_call') {
+      const tool = toolMap.get('tool_search');
+      if (!tool) continue;
+      toolCalls.push(
+        buildDetectedCall(
+          tool,
+          parseLooseJsonValue(body) ?? { arguments: {} },
+          'tool_search'
+        )
+      );
+      continue;
+    }
+
+    if (tagName === 'web_search_call') {
+      const tool = toolMap.get('web_search');
+      if (!tool) continue;
+      toolCalls.push(
+        buildDetectedCall(
+          tool,
+          parseLooseJsonValue(body) ?? { query: body },
+          'web_search'
+        )
+      );
+      continue;
+    }
+
+    if (tagName === 'image_generation_call') {
+      const tool = toolMap.get('image_generation');
+      if (!tool) continue;
+      toolCalls.push(
+        buildDetectedCall(
+          tool,
+          parseLooseJsonValue(body) ?? { prompt: body },
+          'image_generation'
+        )
+      );
+    }
+  }
+};
+
 export const extractThinkingSections = (
   text: string
 ): { visibleText: string; reasoningText: string } => {
@@ -977,28 +1173,62 @@ export const extractThinkingSections = (
   };
 };
 
-export const findFirstToolCallIndex = (text: string, tools: any[]): number => {
-  if (!text || !Array.isArray(tools) || tools.length === 0) return -1;
-
+const collectToolSignalIndices = (
+  text: string,
+  tools: any[],
+  conservative: boolean
+): number[] => {
   const normalizedTools = normalizeToolDefinitions(tools);
   const indices: number[] = [];
+  if (!text || normalizedTools.length === 0) return indices;
+
   const pushIndex = (index: number) => {
     if (index >= 0) indices.push(index);
   };
 
-  const structuredPatterns = [
-    /\{\s*"tool_calls"\s*:/,
-    /\{\s*"tool"\s*:/,
-    /\{\s*"type"\s*:\s*"(?:function|custom|local_shell|tool_search|web_search|image_generation)"/,
-    /\[Tool call:/,
-  ];
+  if (conservative) {
+    const expectsJsonProtocol = normalizedTools.some(
+      (tool) => tool.kind !== 'custom' || !RAW_CUSTOM_TOOL_NAMES.has(tool.name)
+    );
+    if (expectsJsonProtocol) {
+      pushIndex(text.indexOf('{'));
+      pushIndex(text.indexOf('```'));
+    }
+    pushIndex(text.indexOf('[Tool call:'));
+  } else {
+    const structuredPatterns = [
+      /\{\s*"tool_calls"\s*:/,
+      /\{\s*"tool"\s*:/,
+      /\{\s*"type"\s*:\s*"(?:function|custom|local_shell|tool_search|web_search|image_generation)"/,
+      /\[Tool call:/,
+      /```/,
+    ];
 
-  for (const pattern of structuredPatterns) {
-    pushIndex(text.search(pattern));
+    for (const pattern of structuredPatterns) {
+      pushIndex(text.search(pattern));
+    }
   }
 
   if (normalizedTools.some((tool) => tool.name === 'apply_patch')) {
     pushIndex(text.indexOf('*** Begin Patch'));
+  }
+  if (normalizedTools.some((tool) => tool.kind === 'function')) {
+    pushIndex(text.search(/<function_call\b/i));
+  }
+  if (normalizedTools.some((tool) => tool.kind === 'custom')) {
+    pushIndex(text.search(/<custom_tool_call\b/i));
+  }
+  if (normalizedTools.some((tool) => tool.kind === 'local_shell')) {
+    pushIndex(text.search(/<local_shell_call\b/i));
+  }
+  if (normalizedTools.some((tool) => tool.kind === 'tool_search')) {
+    pushIndex(text.search(/<tool_search_call\b/i));
+  }
+  if (normalizedTools.some((tool) => tool.kind === 'web_search')) {
+    pushIndex(text.search(/<web_search_call\b/i));
+  }
+  if (normalizedTools.some((tool) => tool.kind === 'image_generation')) {
+    pushIndex(text.search(/<image_generation_call\b/i));
   }
   if (normalizedTools.some((tool) => tool.name === 'js_repl')) {
     pushIndex(text.indexOf('// codex-js-repl:'));
@@ -1010,6 +1240,19 @@ export const findFirstToolCallIndex = (text: string, tools: any[]): number => {
     pushIndex(text.indexOf('// @exec:'));
   }
 
+  return indices;
+};
+
+export const findFirstToolCallStartIndex = (
+  text: string,
+  tools: any[]
+): number => {
+  const indices = collectToolSignalIndices(text, tools, true);
+  return indices.length > 0 ? Math.min(...indices) : -1;
+};
+
+export const findFirstToolCallIndex = (text: string, tools: any[]): number => {
+  const indices = collectToolSignalIndices(text, tools, false);
   return indices.length > 0 ? Math.min(...indices) : -1;
 };
 
@@ -1091,6 +1334,9 @@ export const detectToolCalls = (
       toolCalls.push(buildDetectedCall(tool, args, tool.kind));
     }
   }
+  if (toolCalls.length > 0) return toolCalls;
+
+  collectToolCallsFromTaggedText(cleaned, toolMap, toolCalls);
   if (toolCalls.length > 0) return toolCalls;
 
   const jsonCandidates = [

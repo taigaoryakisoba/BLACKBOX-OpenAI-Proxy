@@ -30,6 +30,7 @@ import {
   detectToolCalls,
   extractThinkingSections,
   findFirstToolCallIndex,
+  findFirstToolCallStartIndex,
 } from '../../../services/openai';
 import responsesStore from '../../../services/responses-store';
 import blackboxChatService from '../../../services/blackbox-chat';
@@ -652,7 +653,10 @@ export const responses = async (req: Request, res: Response) => {
           fullText += delta;
           const visibleText = extractThinkingSections(fullText).visibleText;
           const remainingText = visibleText.slice(emittedText.length);
-          const firstToolIndex = findFirstToolCallIndex(remainingText, body.tools ?? []);
+          const firstToolIndex = findFirstToolCallStartIndex(
+            remainingText,
+            body.tools ?? []
+          );
 
           if (firstToolIndex >= 0) {
             const safeText = remainingText.slice(0, firstToolIndex);
@@ -692,6 +696,22 @@ export const responses = async (req: Request, res: Response) => {
         : null;
 
       const toolCalls = detectToolCalls(visibleText, body.tools ?? []);
+      if (!toolCalls || toolCalls.length === 0) {
+        const trailingText = visibleText.slice(emittedText.length);
+        if (trailingText) {
+          startMessageIfNeeded();
+          writeSseEvent(res, 'response.output_text.delta', {
+            type: 'response.output_text.delta',
+            item_id: messageItemId,
+            output_index: outputItems.length,
+            content_index: 0,
+            delta: trailingText,
+            sequence_number: seq++,
+          });
+          emittedText += trailingText;
+        }
+      }
+
       if (hasStartedMessage && emittedText.trim()) {
         const messageItem = buildMessageItem(emittedText);
         messageItem.id = messageItemId;

@@ -7,6 +7,7 @@ import {
   genId,
   genShortId,
   extractAIResponse,
+  extractRawAIResponse,
   nowUnix,
   setSseHeaders,
   writeSseData,
@@ -23,6 +24,7 @@ import {
   makeChatCompletionChunk,
   buildToolSystemPrompt,
   detectToolCalls,
+  findFirstToolCallStartIndex,
 } from '../../../services/openai';
 import blackboxChatService from '../../../services/blackbox-chat';
 import logger from '../../../services/logger';
@@ -164,22 +166,13 @@ export const chatCompletions = async (req: Request, res: Response) => {
           let isToolCallCandidate = false;
           if (hasTools) {
             const remainingText = processedText.slice(streamedTextLength);
-            const idx1 = remainingText.indexOf('{');
-            const idx2 = remainingText.indexOf('[Tool call:');
-            const idx3 = remainingText.indexOf('```');
-            const idx4 = remainingText.indexOf('*** Begin Patch');
-            const idx5 = remainingText.indexOf('// codex-js-repl:');
-            const idx6 = remainingText.indexOf('// codex-artifact-tool:');
-            const idx7 = remainingText.indexOf('// @exec:');
-
-            const indices = [idx1, idx2, idx3, idx4, idx5, idx6, idx7].filter(
-              (i) => i !== -1
+            const firstIndicatorIdx = findFirstToolCallStartIndex(
+              remainingText,
+              body.tools ?? []
             );
 
-            if (indices.length > 0) {
+            if (firstIndicatorIdx >= 0) {
               isToolCallCandidate = true;
-              const firstIndicatorIdx = Math.min(...indices);
-
               if (firstIndicatorIdx > 0) {
                 const safeText = remainingText.slice(0, firstIndicatorIdx);
                 writeSseData(
@@ -296,11 +289,11 @@ export const chatCompletions = async (req: Request, res: Response) => {
         DEBUG_MAX_CHARS,
       }
     );
-    const aiText = extractAIResponse(data, DEBUG_MAX_CHARS);
-    const processedText = aiText
+    const rawText = extractRawAIResponse(data);
+    const rawProcessedText = rawText
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .trim();
-    const toolCalls = detectToolCalls(processedText, body.tools ?? []);
+    const toolCalls = detectToolCalls(rawProcessedText, body.tools ?? []);
 
     if (toolCalls && toolCalls.length > 0) {
       return res.json({
@@ -332,6 +325,11 @@ export const chatCompletions = async (req: Request, res: Response) => {
         },
       });
     }
+
+    const aiText = extractAIResponse(data, DEBUG_MAX_CHARS);
+    const processedText = aiText
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .trim();
 
     return res.json({
       id: `chatcmpl_${genId()}`,
