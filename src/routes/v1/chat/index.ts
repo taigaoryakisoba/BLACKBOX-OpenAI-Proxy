@@ -3,6 +3,6 @@ import { chatCompletions } from './chat.controller';
 
 const router = Router();
 
-router.post('/completions', chatCompletions as any);
+router.post('/completions', chatCompletions);
 
 export default router;

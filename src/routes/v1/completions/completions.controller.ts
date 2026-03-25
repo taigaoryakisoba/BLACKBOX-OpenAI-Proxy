@@ -220,7 +220,7 @@ const getVisibleCompletionText = (
 export const completions = async (req: Request, res: Response) => {
   const startTime = Date.now();
   const body = req.body ?? {};
-  const reqId = (req as any).reqId ?? genId();
+  const reqId = req.reqId;
 
   const resolved = resolveModel(MODEL_CONFIG, body.model);
   if (!resolved) {
@@ -336,8 +336,7 @@ export const completions = async (req: Request, res: Response) => {
       let inThinkBlock = false;
 
       if (upstream.body) {
-        for await (const delta of readUpstreamDeltas(upstream.body.getReader())) {
-          const chunk = delta as string;
+        for await (const chunk of readUpstreamDeltas(upstream.body.getReader())) {
           fullGeneratedText += chunk;
 
           if (

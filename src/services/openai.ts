@@ -414,24 +414,24 @@ export const normalizeToolDefinitions = (
         const name = fn.name ?? tool.name ?? '';
         if (!name) return null;
         return {
-          kind: 'function' as const,
+          kind: 'function',
           name,
           description: fn.description ?? tool.description ?? '',
           parameters: fn.parameters ?? tool.parameters ?? {},
           rawTool: tool,
-        };
+        } satisfies NormalizedToolDefinition;
       }
 
       if (type === 'custom') {
         const name = tool.name ?? '';
         if (!name) return null;
         return {
-          kind: 'custom' as const,
+          kind: 'custom',
           name,
           description: tool.description ?? '',
           format: tool.format ?? null,
           rawTool: tool,
-        };
+        } satisfies NormalizedToolDefinition;
       }
 
       if (

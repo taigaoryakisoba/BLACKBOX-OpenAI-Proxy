@@ -431,7 +431,7 @@ export const compact = async (req: Request, res: Response) => {
   }
 
   const body = compactValidation.data;
-  const reqId = (req as any).reqId ?? genId();
+  const reqId = req.reqId;
 
   const resolved = resolveModel(MODEL_CONFIG, body.model);
   if (!resolved) {
@@ -504,7 +504,7 @@ export const responses = async (req: Request, res: Response) => {
   }
 
   const body = responsesValidation.data;
-  const reqId = (req as any).reqId ?? genId();
+  const reqId = req.reqId;
 
   const resolved = resolveModel(MODEL_CONFIG, body.model);
   if (!resolved) {

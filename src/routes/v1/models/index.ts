@@ -3,6 +3,6 @@ import { getModels } from './models.controller';
 
 const router = Router();
 
-router.get('/', getModels as any);
+router.get('/', getModels);
 
 export default router;

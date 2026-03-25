@@ -1,8 +1,5 @@
 import { Request, Response } from 'express';
-import {
-  MAX_TOKENS_DEFAULT,
-  DEBUG_MAX_CHARS,
-} from '../../../configs/env';
+import { MAX_TOKENS_DEFAULT, DEBUG_MAX_CHARS } from '../../../configs/env';
 import { MODEL_CONFIG } from '../../../configs/models';
 import { ChatCompletionsBodySchema } from '../../../schemas/openai';
 import {
@@ -40,7 +37,7 @@ export const chatCompletions = async (req: Request, res: Response) => {
   }
 
   const body = chatCompletionValidation.data;
-  const reqId = (req as any).reqId ?? genId();
+  const reqId = req.reqId;
 
   const resolved = resolveModel(MODEL_CONFIG, body.model);
   if (!resolved) {

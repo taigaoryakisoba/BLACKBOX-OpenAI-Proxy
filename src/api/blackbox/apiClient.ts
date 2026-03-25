@@ -94,4 +94,4 @@ export const BlackboxApiClient = {
   resolveUrl,
   requestPage,
   requestApi,
-} as const;
+};

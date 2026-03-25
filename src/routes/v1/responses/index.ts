@@ -8,9 +8,9 @@ import {
 
 const router = Router();
 
-router.post('/compact', compact as any);
-router.post('/', responses as any);
-router.get('/:responseId', retrieveResponse as any);
-router.post('/:responseId/cancel', cancelResponse as any);
+router.post('/compact', compact);
+router.post('/', responses);
+router.get('/:responseId', retrieveResponse);
+router.post('/:responseId/cancel', cancelResponse);
 
 export default router;

@@ -111,26 +111,30 @@ class BlackboxValidationService {
 
     if (!this.pendingResolution) {
       this.pendingResolution = this.discoverRuntimeToken()
-        .then((token) => {
+        .then((token): BlackboxValidationContext => {
           this.runtimeToken = token;
           this.lastFailureAt = 0;
           logger.info('[BlackboxValidation] Runtime validation token discovered');
 
           return {
             token,
-            source: 'runtime' as const,
+            source: 'runtime',
           };
         })
-        .catch((error: any) => {
+        .catch((error: unknown): BlackboxValidationContext => {
           this.lastFailureAt = Date.now();
+          const message =
+            error instanceof Error
+              ? error.message
+              : 'Validation token discovery failed';
           logger.warn(
-            `[BlackboxValidation] ${error?.message ?? 'Validation token discovery failed'}`
+            `[BlackboxValidation] ${message}`
           );
           this.clearRuntimeToken();
 
           return {
             token: '',
-            source: 'none' as const,
+            source: 'none',
           };
         })
         .finally(() => {

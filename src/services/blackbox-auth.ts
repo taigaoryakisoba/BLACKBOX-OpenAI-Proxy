@@ -39,6 +39,28 @@ interface SessionPayload {
   user?: SessionUser | null;
 }
 
+interface HeadersWithGetSetCookie extends Headers {
+  getSetCookie(): string[];
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+const isSessionUser = (value: unknown): value is SessionUser =>
+  isRecord(value) &&
+  (!('email' in value) ||
+    typeof value.email === 'string' ||
+    value.email === null);
+
+const isSessionPayload = (value: unknown): value is SessionPayload =>
+  isRecord(value) &&
+  (!('user' in value) || value.user === null || isSessionUser(value.user));
+
+const hasGetSetCookie = (
+  headers: Headers
+): headers is HeadersWithGetSetCookie =>
+  typeof Reflect.get(headers, 'getSetCookie') === 'function';
+
 class CookieJar {
   private readonly cookies = new Map<string, string>();
 
@@ -99,11 +121,8 @@ const splitCombinedSetCookieHeader = (headerValue: string): string[] => {
 };
 
 const getSetCookieHeaders = (headers: Headers): string[] => {
-  const withGetSetCookie = headers as Headers & {
-    getSetCookie?: () => string[];
-  };
-  if (typeof withGetSetCookie.getSetCookie === 'function') {
-    const setCookies = withGetSetCookie.getSetCookie();
+  if (hasGetSetCookie(headers)) {
+    const setCookies = headers.getSetCookie();
     if (setCookies.length > 0) return setCookies;
   }
 
@@ -218,9 +237,7 @@ class BlackboxAuthService {
     if (!response.ok) return null;
 
     const payload = await response.json().catch(() => null);
-    return payload && typeof payload === 'object'
-      ? (payload as SessionPayload)
-      : null;
+    return isSessionPayload(payload) ? payload : null;
   }
 
   private async resolveCustomerIdWithCookie(
@@ -250,9 +267,7 @@ class BlackboxAuthService {
 
     const payload = await response.json().catch(() => null);
     const customerId =
-      payload &&
-      typeof payload === 'object' &&
-      typeof payload.customerId === 'string'
+      isRecord(payload) && typeof payload.customerId === 'string'
         ? payload.customerId
         : '';
 
@@ -371,14 +386,16 @@ class BlackboxAuthService {
 
     if (!this.pendingLogin) {
       this.pendingLogin = this.performRuntimeLogin()
-        .catch((error: any) => {
+        .catch((error: unknown): BlackboxAuthContext => {
           this.lastFailureAt = Date.now();
-          logger.warn(`[BlackboxAuth] ${error?.message ?? 'Runtime login failed'}`);
+          const message =
+            error instanceof Error ? error.message : 'Runtime login failed';
+          logger.warn(`[BlackboxAuth] ${message}`);
           this.clearRuntimeState();
           return {
             cookieHeader: '',
             customerId: '',
-            source: 'none' as const,
+            source: 'none',
           };
         })
         .finally(() => {

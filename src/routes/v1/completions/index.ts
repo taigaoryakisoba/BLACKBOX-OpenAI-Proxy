@@ -3,6 +3,6 @@ import { completions } from './completions.controller';
 
 const router = Router();
 
-router.post('/', completions as any);
+router.post('/', completions);
 
 export default router;
