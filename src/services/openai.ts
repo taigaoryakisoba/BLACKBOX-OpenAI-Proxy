@@ -110,6 +110,39 @@ const RAW_CUSTOM_TOOL_NAMES = new Set([
 const stringifyStructuredToolEnvelope = (toolCall: Record<string, unknown>) =>
   JSON.stringify({ tool_calls: [toolCall] }, null, 2);
 
+const findPartialLineMarkerIndex = (
+  text: string,
+  marker: string,
+  minPrefixLength: number
+): number => {
+  if (!text || !marker) return -1;
+
+  let earliest = -1;
+  let lineStart = 0;
+
+  while (lineStart < text.length) {
+    const candidate = text.slice(lineStart);
+
+    if (text.startsWith(marker, lineStart)) {
+      return lineStart;
+    }
+
+    if (
+      candidate.length >= minPrefixLength &&
+      candidate.length < marker.length &&
+      marker.startsWith(candidate)
+    ) {
+      earliest = earliest === -1 ? lineStart : Math.min(earliest, lineStart);
+    }
+
+    const nextBreak = text.indexOf('\n', lineStart);
+    if (nextBreak === -1) break;
+    lineStart = nextBreak + 1;
+  }
+
+  return earliest;
+};
+
 const serializePendingToolCall = (
   item: any,
   kind:
@@ -281,6 +314,22 @@ export const normalizeResponsesInputToOpenAiMessages = (
       continue;
     }
 
+    if (item.type === 'apply_patch_call') {
+      pendingToolCalls.push(
+        serializePendingToolCall(
+          {
+            name: 'apply_patch',
+            input:
+              typeof item.operation?.diff === 'string'
+                ? item.operation.diff
+                : '',
+          },
+          'custom'
+        )
+      );
+      continue;
+    }
+
     if (item.type === 'local_shell_call') {
       pendingToolCalls.push(serializePendingToolCall(item, 'local_shell'));
       continue;
@@ -315,6 +364,17 @@ export const normalizeResponsesInputToOpenAiMessages = (
       msgs.push({
         role: 'user',
         content: serializeToolOutput('custom', item),
+      });
+      continue;
+    }
+
+    if (item.type === 'apply_patch_call_output') {
+      msgs.push({
+        role: 'user',
+        content: serializeToolOutput('custom', {
+          call_id: item.call_id,
+          output: item.output ?? '',
+        }),
       });
       continue;
     }
@@ -502,6 +562,22 @@ export const normalizeToolDefinitions = (
         } satisfies NormalizedToolDefinition;
       }
 
+      if (type === 'apply_patch') {
+        return {
+          kind: 'custom',
+          name: 'apply_patch',
+          description:
+            tool.description ?? 'Apply a V4A patch to files in the workspace.',
+          format:
+            tool.format ?? {
+              type: 'grammar',
+              syntax: 'v4a-diff',
+              definition: 'Use the apply_patch V4A diff format.',
+            },
+          rawTool: tool,
+        } satisfies NormalizedToolDefinition;
+      }
+
       if (
         type === 'local_shell' ||
         type === 'tool_search' ||
@@ -643,20 +719,32 @@ export const buildToolSystemPrompt = (
     customFormatLines.push(
       '- For `apply_patch`, output ONLY the raw patch text. Do not wrap it in JSON, markdown fences, or commentary.'
     );
+    customFormatLines.push(
+      '- For `apply_patch`, the very first characters of your response must be `*** Begin Patch`.'
+    );
   }
   if (customTools.some((tool) => tool.name === 'js_repl')) {
     customFormatLines.push(
       '- For `js_repl`, output ONLY raw JavaScript source, optionally starting with `// codex-js-repl:`.'
+    );
+    customFormatLines.push(
+      '- For `js_repl`, do not add any explanatory text before the `// codex-js-repl:` header.'
     );
   }
   if (customTools.some((tool) => tool.name === 'artifacts')) {
     customFormatLines.push(
       '- For `artifacts`, output ONLY raw JavaScript source, optionally starting with `// codex-artifact-tool:`.'
     );
+    customFormatLines.push(
+      '- For `artifacts`, do not add any explanatory text before the `// codex-artifact-tool:` header.'
+    );
   }
   if (customTools.some((tool) => tool.name === 'exec')) {
     customFormatLines.push(
       '- For `exec`, output ONLY raw code, optionally starting with `// @exec:`.'
+    );
+    customFormatLines.push(
+      '- For `exec`, do not add any explanatory text before the `// @exec:` header.'
     );
   }
   if (genericCustomTools.length > 0) {
@@ -880,6 +968,7 @@ const buildDetectedCall = (
       name: tool.name,
       arguments: input,
       payload: typeof value === 'object' ? value : undefined,
+      apiType: typeof tool.rawTool?.type === 'string' ? tool.rawTool.type : undefined,
     };
   }
 
@@ -1062,6 +1151,83 @@ const collectToolCallsFromJson = (
   }
 };
 
+interface ApplyPatchOperation {
+  type: 'create_file' | 'update_file' | 'delete_file';
+  path: string;
+  diff: string;
+}
+
+const parseApplyPatchOperations = (
+  patchText: string
+): ApplyPatchOperation[] => {
+  if (!patchText.includes('*** Begin Patch')) return [];
+
+  const lines = patchText.replace(/\r\n/g, '\n').split('\n');
+  const operations: ApplyPatchOperation[] = [];
+  let active:
+    | {
+        start: number;
+        type: ApplyPatchOperation['type'];
+        path: string;
+      }
+    | null = null;
+
+  const flushActive = (endExclusive: number) => {
+    if (!active) return;
+    const diff = lines.slice(active.start, endExclusive).join('\n').trimEnd();
+    if (diff) {
+      operations.push({
+        type: active.type,
+        path: active.path,
+        diff,
+      });
+    }
+    active = null;
+  };
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+
+    if (line.startsWith('*** Add File: ')) {
+      flushActive(index);
+      active = {
+        start: index,
+        type: 'create_file',
+        path: line.slice('*** Add File: '.length).trim(),
+      };
+      continue;
+    }
+
+    if (line.startsWith('*** Update File: ')) {
+      flushActive(index);
+      active = {
+        start: index,
+        type: 'update_file',
+        path: line.slice('*** Update File: '.length).trim(),
+      };
+      continue;
+    }
+
+    if (line.startsWith('*** Delete File: ')) {
+      flushActive(index);
+      active = {
+        start: index,
+        type: 'delete_file',
+        path: line.slice('*** Delete File: '.length).trim(),
+      };
+      continue;
+    }
+
+    if (line === '*** End Patch') {
+      flushActive(index);
+      break;
+    }
+  }
+
+  flushActive(lines.length);
+  return operations;
+};
+
 const extractTagAttribute = (
   attrsText: string,
   attributeName: string
@@ -1210,7 +1376,10 @@ const collectToolSignalIndices = (
   }
 
   if (normalizedTools.some((tool) => tool.name === 'apply_patch')) {
-    pushIndex(text.indexOf('*** Begin Patch'));
+    const patchIndex = conservative
+      ? findPartialLineMarkerIndex(text, '*** Begin Patch', 3)
+      : text.indexOf('*** Begin Patch');
+    pushIndex(patchIndex);
   }
   if (normalizedTools.some((tool) => tool.kind === 'function')) {
     pushIndex(text.search(/<function_call\b/i));
@@ -1231,13 +1400,22 @@ const collectToolSignalIndices = (
     pushIndex(text.search(/<image_generation_call\b/i));
   }
   if (normalizedTools.some((tool) => tool.name === 'js_repl')) {
-    pushIndex(text.indexOf('// codex-js-repl:'));
+    const jsReplIndex = conservative
+      ? findPartialLineMarkerIndex(text, '// codex-js-repl:', 3)
+      : text.indexOf('// codex-js-repl:');
+    pushIndex(jsReplIndex);
   }
   if (normalizedTools.some((tool) => tool.name === 'artifacts')) {
-    pushIndex(text.indexOf('// codex-artifact-tool:'));
+    const artifactsIndex = conservative
+      ? findPartialLineMarkerIndex(text, '// codex-artifact-tool:', 3)
+      : text.indexOf('// codex-artifact-tool:');
+    pushIndex(artifactsIndex);
   }
   if (normalizedTools.some((tool) => tool.name === 'exec')) {
-    pushIndex(text.indexOf('// @exec:'));
+    const execIndex = conservative
+      ? findPartialLineMarkerIndex(text, '// @exec:', 3)
+      : text.indexOf('// @exec:');
+    pushIndex(execIndex);
   }
 
   return indices;
@@ -1274,9 +1452,28 @@ export const detectToolCalls = (
     const patchRegex = /\*\*\* Begin Patch[\s\S]*?(?:\*\*\* End Patch|$)/g;
     let match: RegExpExecArray | null;
     while ((match = patchRegex.exec(cleaned)) !== null) {
-      toolCalls.push(
-        buildDetectedCall(applyPatchTool, match[0], applyPatchTool.kind)
-      );
+      const patchText = match[0];
+
+      if (applyPatchTool.rawTool?.type === 'apply_patch') {
+        const operations = parseApplyPatchOperations(patchText);
+        if (operations.length > 0) {
+          for (const operation of operations) {
+            toolCalls.push(
+              buildDetectedCall(
+                applyPatchTool,
+                {
+                  input: operation.diff,
+                  operation,
+                },
+                applyPatchTool.kind
+              )
+            );
+          }
+          continue;
+        }
+      }
+
+      toolCalls.push(buildDetectedCall(applyPatchTool, patchText, applyPatchTool.kind));
     }
     if (toolCalls.length > 0) return toolCalls;
   }

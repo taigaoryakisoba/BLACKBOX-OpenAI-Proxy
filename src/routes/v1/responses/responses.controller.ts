@@ -90,6 +90,29 @@ const buildToolResponseItem = (toolCall: any) => {
   const kind = toolCall.kind ?? 'function';
 
   if (kind === 'custom') {
+    if (toolCall.apiType === 'apply_patch') {
+      const operation =
+        toolCall.payload?.operation &&
+        typeof toolCall.payload.operation === 'object'
+          ? toolCall.payload.operation
+          : {
+              type: 'update_file',
+              path: '',
+              diff: toolCall.arguments,
+            };
+
+      return {
+        outputItem: {
+          id: `apc_${genId()}`,
+          type: 'apply_patch_call',
+          status: 'completed',
+          call_id: callId,
+          operation,
+        },
+        callId,
+      };
+    }
+
     return {
       outputItem: {
         id: `ctc_${genId()}`,
@@ -212,8 +235,11 @@ const buildResponseFromRawText = ({
 
   if (toolCalls && toolCalls.length > 0) {
     const firstToolIndex = findFirstToolCallIndex(visibleText, body.tools ?? []);
+    const suppressLeadingMessage = toolCalls.some(
+      (toolCall) => toolCall.apiType === 'apply_patch'
+    );
     const messageText =
-      firstToolIndex >= 0
+      !suppressLeadingMessage && firstToolIndex >= 0
         ? visibleText.slice(0, firstToolIndex).trimEnd()
         : '';
 
@@ -659,8 +685,12 @@ export const responses = async (req: Request, res: Response) => {
           );
 
           if (firstToolIndex >= 0) {
+            const suppressLeadingTextForApplyPatch =
+              Array.isArray(body.tools) &&
+              body.tools.some((tool: any) => tool?.type === 'apply_patch') &&
+              remainingText.slice(firstToolIndex).startsWith('***');
             const safeText = remainingText.slice(0, firstToolIndex);
-            if (safeText) {
+            if (safeText && !suppressLeadingTextForApplyPatch) {
               startMessageIfNeeded();
               writeSseEvent(res, 'response.output_text.delta', {
                 type: 'response.output_text.delta',
@@ -768,6 +798,45 @@ export const responses = async (req: Request, res: Response) => {
               name: outputItem.name,
               output_index: outputItems.length,
               arguments: outputItem.arguments,
+              sequence_number: seq++,
+            });
+          }
+
+          if (outputItem.type === 'apply_patch_call') {
+            writeSseEvent(res, 'response.output_item.added', {
+              type: 'response.output_item.added',
+              output_index: outputItems.length,
+              item: {
+                ...outputItem,
+                status: 'in_progress',
+              },
+              sequence_number: seq++,
+            });
+          }
+
+          if (outputItem.type === 'custom_tool_call') {
+            writeSseEvent(res, 'response.output_item.added', {
+              type: 'response.output_item.added',
+              output_index: outputItems.length,
+              item: {
+                ...outputItem,
+                status: 'in_progress',
+                input: '',
+              },
+              sequence_number: seq++,
+            });
+            writeSseEvent(res, 'response.custom_tool_call_input.delta', {
+              type: 'response.custom_tool_call_input.delta',
+              item_id: outputItem.id,
+              output_index: outputItems.length,
+              delta: outputItem.input,
+              sequence_number: seq++,
+            });
+            writeSseEvent(res, 'response.custom_tool_call_input.done', {
+              type: 'response.custom_tool_call_input.done',
+              item_id: outputItem.id,
+              output_index: outputItems.length,
+              input: outputItem.input,
               sequence_number: seq++,
             });
           }

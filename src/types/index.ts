@@ -9,6 +9,7 @@ export interface ToolCall {
   name: string;
   arguments: string;
   payload?: any;
+  apiType?: string;
 }
 
 export interface OpenAIMessage {
